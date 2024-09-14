@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::BufReader;
-use bptm::{Bpmn, ECNet, Error, parse_xml};
+use petri_nets::{Bpmn, ECNet, Error, parse_xml};
 
 fn main() -> Result<(), Error> {
     // Read the input file from the command line arguments

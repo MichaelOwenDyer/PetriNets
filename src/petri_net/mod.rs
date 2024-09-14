@@ -37,7 +37,6 @@ impl Display for TransitionId {
 }
 
 /// If there is an improperly formatted ID in the XML file, we return an error
-#[allow(unused)]
 #[derive(Debug)]
 pub enum IdParseError {
     InvalidPrefix(char), // The ID does not start with the expected char prefix
