@@ -169,92 +169,6 @@ struct TransitionIO {
     outputs: Vec<PlaceId>,
 }
 
-/// Holds some transition IO data and references to the capacity and weight functions
-/// for efficient transition firing
-#[derive(Debug)]
-struct FiringFn<'net, C: CapacityFn, W: WeightFn> {
-    transition_ios: Vec<TransitionIO>,
-    capacities: &'net C,
-    weights: &'net W,
-}
-
-impl<'net, C: CapacityFn, W: WeightFn> FiringFn<'net, C, W> {
-    /// Create a new transition firing function for the given Petri net
-    fn new(petri_net: &'net PetriNet<C, W>) -> Self {
-        let mut transitions = Vec::with_capacity(petri_net.transitions.len());
-        // For each transition in the net, collect its ID, input places, and output places
-        for transition in &petri_net.transitions {
-            let transition_id = transition.id;
-            let mut inputs = Vec::new();
-            let mut outputs = Vec::new();
-            for arc in &petri_net.arcs {
-                match arc {
-                    Arc::PlaceTransition(source, target) if target == &transition.id => {
-                        inputs.push(*source);
-                    }
-                    Arc::TransitionPlace(source, target) if source == &transition.id => {
-                        outputs.push(*target);
-                    }
-                    _ => {}
-                }
-            }
-            transitions.push(TransitionIO { transition_id, inputs, outputs });
-        }
-        Self {
-            transition_ios: transitions,
-            capacities: &petri_net.capacities,
-            weights: &petri_net.weights,
-        }
-    }
-
-    /// Fires all enabled transitions in the Petri net from the provided marking,
-    /// and returns a list of the resulting markings.
-    /// This attempts to fire all transitions, but silently fails for those that are not enabled.
-    /// This function also updates the place boundedness and transition liveness.
-    #[rustfmt::skip]
-    fn fire_transitions(
-        &self,
-        from: &Marking,
-        boundedness: &mut Boundedness,
-        liveness: &mut LivenessMap,
-    ) -> Vec<(TransitionId, Marking)> {
-        self.transition_ios.iter().filter_map(|TransitionIO { transition_id, inputs, outputs }| {
-            // Create a clone of the start marking to modify
-            let mut marking = from.clone();
-            // Start by checking that all the input places have sufficient tokens to fire the transition
-            inputs.iter().try_for_each(|source| {
-                let current_tokens = marking.get(source);
-                let token_requirement = self.weights.get(&Arc::PlaceTransition(*source, *transition_id));
-                current_tokens.checked_sub(token_requirement)
-                    .map(|new_tokens| marking.set(*source, new_tokens))
-                    .ok_or(()) // Produce Ok if tokens were removed, Err if not enough tokens
-            // Then check that all outputs have enough capacity to store the new tokens
-            }).and_then(|_| outputs.iter().try_for_each(|target| {
-                let current = marking.get(target);
-                let output_tokens = self.weights.get(&Arc::TransitionPlace(*transition_id, *target));
-                let capacity = self.capacities.get_or_default(target);
-                capacity.checked_sub(output_tokens)
-                    .filter(|&max_current_tokens| current <= max_current_tokens)
-                    .map(|_| {
-                        let new_tokens = current + output_tokens;
-                        // If so, add the tokens to the target place
-                        marking.set(*target, new_tokens);
-                        // Since we are increasing tokens on a place, we need to update the boundedness
-                        boundedness.update(*target, new_tokens);
-                    })
-                    .ok_or(()) // Produce Ok if tokens were added, Err if not enough capacity
-            // If the transition fired successfully, return its ID and the resulting marking
-            }))
-                .ok()
-                .map(|_| {
-                    // This transition fired successfully, so it must be at least L1-live
-                    liveness.update(*transition_id, Live::L1);
-                    (*transition_id, marking)
-                })
-        }).collect() // Collect all successful firing attempts
-    }
-}
-
 /// Struct for keeping track of the markings we have seen before and their IDs
 #[derive(Debug, Default)]
 struct Markings {
@@ -277,7 +191,7 @@ impl Markings {
 #[derive(Debug, Clone)]
 pub struct IncidenceMatrix<'net, C: CapacityFn, W: WeightFn> {
     petri_net: &'net PetriNet<C, W>,
-    matrix: Vec<Vec<usize>>,
+    matrix: Vec<Vec<isize>>,
 }
 
 /// A reachability graph is a list of markings, each with a unique ID,
@@ -291,9 +205,32 @@ pub struct ReachabilityAnalysis<'net, C: CapacityFn, W: WeightFn> {
 }
 
 impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
+    /// Create a Vec<TransitionIO> for efficient transition firing
+    fn transition_io(&self) -> Vec<TransitionIO> {
+        let mut transitions = Vec::with_capacity(self.transitions.len());
+        // For each transition in the net, collect its ID, input places, and output places
+        for transition in &self.transitions {
+            let transition_id = transition.id;
+            let mut inputs = Vec::new();
+            let mut outputs = Vec::new();
+            for arc in &self.arcs {
+                match arc {
+                    Arc::PlaceTransition(source, target) if target == &transition.id => {
+                        inputs.push(*source);
+                    }
+                    Arc::TransitionPlace(source, target) if source == &transition.id => {
+                        outputs.push(*target);
+                    }
+                    _ => {}
+                }
+            }
+            transitions.push(TransitionIO { transition_id, inputs, outputs });
+        }
+        transitions
+    }
     /// Compute the incidence matrix for detecting unboundedness
-    pub fn incidence_matrix(&self) -> IncidenceMatrix<'_, C, W> {
-        let matrix: Vec<Vec<usize>> = Vec::with_capacity(self.places.len());
+    pub fn incidence_matrix(&self, transition_io: &[TransitionIO]) -> IncidenceMatrix<'_, C, W> {
+        let matrix: Vec<Vec<isize>> = vec![vec![0; self.transitions.len()]; self.places.len()];
         for _p in &self.places {
             todo!()
         }
@@ -302,19 +239,70 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
             matrix,
         }
     }
+    /// Fires all enabled transitions in the Petri net from the provided marking,
+    /// and returns a list of the resulting markings.
+    /// This attempts to fire all transitions, but silently fails for those that are not enabled.
+    /// This function also updates the place boundedness and transition liveness.
+    #[rustfmt::skip]
+    fn fire_transitions(
+        transition_ios: &[TransitionIO],
+        capacities: &C,
+        weights: &W,
+        from: &Marking,
+        boundedness: &mut Boundedness,
+        liveness: &mut LivenessMap,
+    ) -> Vec<(TransitionId, Marking)> {
+        transition_ios.iter().filter_map(|TransitionIO { transition_id, inputs, outputs }| {
+            // Create a clone of the start marking to modify
+            let mut marking = from.clone();
+            // Start by checking that all the input places have sufficient tokens to fire the transition
+            inputs.iter().try_for_each(|source| {
+                let current_tokens = marking.get(source);
+                let token_requirement = weights.get(&Arc::PlaceTransition(*source, *transition_id));
+                current_tokens.checked_sub(token_requirement)
+                    .map(|new_tokens| marking.set(*source, new_tokens))
+                    .ok_or(()) // Produce Ok if tokens were removed, Err if not enough tokens
+            // Then check that all outputs have enough capacity to store the new tokens
+            }).and_then(|_| outputs.iter().try_for_each(|target| {
+                let current = marking.get(target);
+                let output_tokens = weights.get(&Arc::TransitionPlace(*transition_id, *target));
+                let capacity = capacities.get_or_default(target);
+                capacity.checked_sub(output_tokens)
+                    .filter(|&max_current_tokens| current <= max_current_tokens)
+                    .map(|_| {
+                        let new_tokens = current + output_tokens;
+                        // If so, add the tokens to the target place
+                        marking.set(*target, new_tokens);
+                        // Since we are increasing tokens on a place, we need to update the boundedness
+                        boundedness.update(*target, new_tokens);
+                    })
+                    .ok_or(()) // Produce Ok if tokens were added, Err if not enough capacity
+            // If the transition fired successfully, return its ID and the resulting marking
+            }))
+                .ok()
+                .map(|_| {
+                    // This transition fired successfully, so it must be at least L1-live
+                    liveness.update(*transition_id, Live::L1);
+                    (*transition_id, marking)
+                })
+        }).collect() // Collect all successful firing attempts
+    }
     /// Perform a reachability analysis on the Petri net
     pub fn reachability_analysis(&self) -> ReachabilityAnalysis<'_, C, W> {
         let mut analysis = ReachabilityAnalysis::new(self);
         let mut liveness = LivenessMap::new(self);
         let mut markings = Markings::default();
         let id = markings.remember(self.initial_marking.clone());
-        let firing_fn = FiringFn::new(self);
+        let transition_io = self.transition_io();
         let mut queue = VecDeque::new();
         // Start the reachability analysis with the initial marking and its enabled transitions
         queue.push_back((
             id,
             self.initial_marking.clone(),
-            firing_fn.fire_transitions(
+            PetriNet::fire_transitions(
+                &transition_io,
+                &self.capacities,
+                &self.weights,
                 &self.initial_marking,
                 &mut analysis.boundedness,
                 &mut liveness,
@@ -329,7 +317,10 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                     continuations.push(Continuation::Seen(transition_id, existing_marking_id));
                 } else {
                     let new_marking_id = markings.remember(resulting_marking.clone());
-                    let new_branches = firing_fn.fire_transitions(
+                    let new_branches = PetriNet::fire_transitions(
+                        &transition_io,
+                        &self.capacities,
+                        &self.weights,
                         &resulting_marking,
                         &mut analysis.boundedness,
                         &mut liveness,
