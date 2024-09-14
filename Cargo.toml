@@ -1,8 +1,8 @@
 [package]
-name = "bptm"
+name = "petri_nets"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 quick-xml = { version = "0.36.1", features = ["serialize", "overlapped-lists"] }
-serde = { version = "1.0.203", features = ["derive"] }
+serde = { version = "1.0.210", features = ["derive"] }
