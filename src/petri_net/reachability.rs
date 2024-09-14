@@ -1,8 +1,8 @@
 //! This module performs reachability analysis on a Petri net
 
+use super::{Arc, CapacityFn, Marking, MarkingFn, PetriNet, PlaceId, TransitionId, WeightFn};
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
-use super::{Arc, CapacityFn, Marking, MarkingFn, PetriNet, PlaceId, TransitionId, WeightFn};
 
 /// A unique ID for a marking in the reachability graph
 #[derive(Debug, Clone, Copy)]
@@ -53,11 +53,14 @@ impl Boundedness {
     }
     /// Updates the boundedness of a place if the new value is greater than the old value
     fn update(&mut self, place_id: PlaceId, tokens: usize) {
-        self.0.entry(place_id).and_modify(|t| {
-            if *t < tokens {
-                *t = tokens;
-            }
-        }).or_insert(tokens);
+        self.0
+            .entry(place_id)
+            .and_modify(|t| {
+                if *t < tokens {
+                    *t = tokens;
+                }
+            })
+            .or_insert(tokens);
     }
 }
 
@@ -95,11 +98,14 @@ impl LivenessMap {
     }
     /// Updates the liveness of a transition if the new value is greater than the old value
     fn update(&mut self, transition_id: TransitionId, live: Live) {
-        self.liveness.entry(transition_id).and_modify(|current| {
-            if *current < live {
-                *current = live;
-            }
-        }).or_insert(live);
+        self.liveness
+            .entry(transition_id)
+            .and_modify(|current| {
+                if *current < live {
+                    *current = live;
+                }
+            })
+            .or_insert(live);
     }
 }
 
@@ -107,7 +113,7 @@ impl LivenessMap {
 /// The index of the array corresponds to the liveness class, e.g. 0 -> L0, 1 -> L1, ...
 #[derive(Debug, Clone, Default)]
 pub struct Liveness {
-    l: [Vec<TransitionId>; 5]
+    l: [Vec<TransitionId>; 5],
 }
 
 impl Liveness {
@@ -120,31 +126,35 @@ impl Liveness {
     }
 }
 
+/// Display a list of items separated by commas
+fn comma_separated<T: Display>(displays: &[T]) -> String {
+    displays.iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Liveness is displayed in the format L0(T1, T2); L1(T3, T4), ...
 impl Display for Liveness {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        fn format_list(name: &'static str, list: &[TransitionId]) -> String {
-            format!(
-                "{} ({});",
-                name,
-                list.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ")
-            )
+        fn display_class(name: &'static str, members: &[TransitionId]) -> String {
+            format!("{} ({});", name, comma_separated(members))
         }
         let mut print = Vec::with_capacity(5);
         if !self.l[0].is_empty() {
-            print.push(format_list("L0", &self.l[0]));
+            print.push(display_class("L0", &self.l[0]));
         }
         if !self.l[1].is_empty() {
-            print.push(format_list("L1", &self.l[1]));
+            print.push(display_class("L1", &self.l[1]));
         }
         if !self.l[2].is_empty() {
-            print.push(format_list("L2", &self.l[2]));
+            print.push(display_class("L2", &self.l[2]));
         }
         if !self.l[3].is_empty() {
-            print.push(format_list("L3", &self.l[3]));
+            print.push(display_class("L3", &self.l[3]));
         }
         if !self.l[4].is_empty() {
-            print.push(format_list("L4", &self.l[4]));
+            print.push(display_class("L4", &self.l[4]));
         }
         write!(f, "{}", print.join(" "))
     }
@@ -201,6 +211,7 @@ impl<'net, C: CapacityFn, W: WeightFn> FiringFn<'net, C, W> {
     /// and returns a list of the resulting markings.
     /// This attempts to fire all transitions, but silently fails for those that are not enabled.
     /// This function also updates the place boundedness and transition liveness.
+    #[rustfmt::skip]
     fn fire_transitions(
         &self,
         from: &Marking,
@@ -266,7 +277,7 @@ impl Markings {
 #[derive(Debug, Clone)]
 pub struct IncidenceMatrix<'net, C: CapacityFn, W: WeightFn> {
     petri_net: &'net PetriNet<C, W>,
-    matrix: Vec<Vec<usize>>
+    matrix: Vec<Vec<usize>>,
 }
 
 /// A reachability graph is a list of markings, each with a unique ID,
@@ -274,7 +285,7 @@ pub struct IncidenceMatrix<'net, C: CapacityFn, W: WeightFn> {
 #[derive(Debug, Clone)]
 pub struct ReachabilityAnalysis<'net, C: CapacityFn, W: WeightFn> {
     petri_net: &'net PetriNet<C, W>,
-    pub graph: Vec<(MarkingId, Marking, Vec<Continuation>)>,
+    pub rows: Vec<(MarkingId, Marking, Vec<Continuation>)>,
     pub boundedness: Boundedness,
     pub liveness: Liveness,
 }
@@ -288,7 +299,7 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
         }
         IncidenceMatrix {
             petri_net: self,
-            matrix
+            matrix,
         }
     }
     /// Perform a reachability analysis on the Petri net
@@ -299,10 +310,15 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
         let id = markings.remember(self.initial_marking.clone());
         let firing_fn = FiringFn::new(self);
         let mut queue = VecDeque::new();
+        // Start the reachability analysis with the initial marking and its enabled transitions
         queue.push_back((
             id,
             self.initial_marking.clone(),
-            firing_fn.fire_transitions(&self.initial_marking, &mut analysis.boundedness, &mut liveness),
+            firing_fn.fire_transitions(
+                &self.initial_marking,
+                &mut analysis.boundedness,
+                &mut liveness,
+            ),
         ));
         while let Some((source_marking_id, source_marking, branches_to_explore)) = queue.pop_front() {
             let mut continuations = Vec::with_capacity(branches_to_explore.len());
@@ -313,12 +329,16 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                     continuations.push(Continuation::Seen(transition_id, existing_marking_id));
                 } else {
                     let new_marking_id = markings.remember(resulting_marking.clone());
-                    let new_branches = firing_fn.fire_transitions(&resulting_marking, &mut analysis.boundedness, &mut liveness);
+                    let new_branches = firing_fn.fire_transitions(
+                        &resulting_marking,
+                        &mut analysis.boundedness,
+                        &mut liveness,
+                    );
                     continuations.push(Continuation::Unseen(transition_id, new_marking_id));
                     queue.push_back((new_marking_id, resulting_marking, new_branches));
                 }
             }
-            analysis.graph.push((source_marking_id, source_marking, continuations));
+            analysis.rows.push((source_marking_id, source_marking, continuations));
         }
         analysis.liveness.categorize(liveness);
         analysis
@@ -331,7 +351,7 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
 #[derive(Debug, Clone)]
 pub enum DeadlockInterpretation {
     Final,
-    Deadlock
+    Deadlock,
 }
 
 /// Display a deadlock interpretation as "final" or "deadlock"
@@ -349,21 +369,22 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     fn new(petri_net: &'net PetriNet<C, W>) -> Self {
         Self {
             petri_net,
-            graph: Vec::new(),
+            rows: Vec::new(),
             boundedness: Boundedness::new(petri_net),
             liveness: Liveness::default(),
         }
     }
     /// Returns a list of deadlocked markings and their interpretation
+    #[rustfmt::skip]
     fn deadlocks(&self) -> Vec<(MarkingId, DeadlockInterpretation)> {
-        self.graph.iter().filter_map(|(marking_id, marking, continuations)| {
+        self.rows.iter().filter_map(|(marking_id, marking, continuations)| {
             if !continuations.is_empty() {
                 return None; // Not a deadlock because there exists a continuation out of this marking
             }
             // Interpret the deadlock
             let interpretation = {
                 // Find all places with tokens
-                let places_with_tokens: Vec<_> = marking.0.iter()
+                let places_with_tokens: Vec<(&PlaceId, &usize)> = marking.0.iter()
                     .filter(|(_, &tokens)| tokens > 0)
                     .collect();
                 // A final deadlock has only one place with one token and no outgoing arcs
@@ -404,14 +425,17 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     /// Returns the markings from which we can reach a previous marking,
     /// forming a loop in the reachability graph
     fn loops(&self) -> Vec<MarkingId> {
-        self.graph.iter().flat_map(|(marking_id, _, continuations)| {
-            continuations.iter().filter_map(|continuation| {
-                match continuation {
-                    Continuation::Seen(_, _) => Some(*marking_id),
-                    _ => None,
-                }
+        self.rows
+            .iter()
+            .flat_map(|(marking_id, _, continuations)| {
+                continuations
+                    .iter()
+                    .filter_map(|continuation| match continuation {
+                        Continuation::Seen(_, _) => Some(*marking_id),
+                        _ => None,
+                    })
             })
-        }).collect()
+            .collect()
     }
     /// Returns true if all places had at least one token at some point,
     /// and all transitions fired at least once
@@ -439,7 +463,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
         writeln!(f, "Transitions")?;
 
         // Print the body of the reachability graph
-        for (marking_id, marking, continuations) in &self.graph {
+        for (marking_id, marking, continuations) in &self.rows {
             // Print the ID of this row's marking
             write!(f, "{:<7}", marking_id.to_string())?;
             // For each place, print the number of tokens on that place in this marking
@@ -447,12 +471,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
                 write!(f, "{:<5}", marking.get(&place.id))?;
             }
             // Print the transitions which can fire from this marking and the markings they lead to
-            let continuations = continuations
-                .iter()
-                .map(|c| c.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(f, "{}", continuations)?;
+            writeln!(f, "{}", comma_separated(continuations))?;
         }
         writeln!(f)?;
 
@@ -466,10 +485,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
         writeln!(f, "Quasi-Live: {}", self.is_quasi_live())?;
         writeln!(f, "Sound: {}", self.is_sound())?;
         writeln!(f, "Liveness: {}", self.liveness)?;
-        writeln!(f, "Loops: {}", self.loops().into_iter()
-            .map(|m| m.to_string())
-            .collect::<Vec<_>>()
-            .join(", "))?;
+        writeln!(f, "Loops: {}", comma_separated(&self.loops()))?;
         writeln!(f, "Soundness: {}", self.is_sound())?;
         Ok(())
     }
