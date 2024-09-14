@@ -53,10 +53,9 @@ impl Boundedness {
     }
 }
 
-#[allow(dead_code)]
 /// Transition liveness classes describe how many times a transition fires
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Live {
+pub enum Live {
     /// Can never fire
     L0,
     /// Fires a finite and deterministic number of times
@@ -71,7 +70,7 @@ enum Live {
 
 /// Liveness is a list of liveness classes for each transition in the Petri net (ID = index)
 #[derive(Debug, Clone)]
-struct Liveness(Vec<Live>);
+pub struct Liveness(Vec<Live>);
 
 impl Liveness {
     /// Create a new liveness map from a list of transitions
@@ -84,41 +83,36 @@ impl Liveness {
     }
 }
 
-/// Display a list of items separated by commas
-fn comma_separated<T: Display>(displays: &[T]) -> String {
-    displays.iter()
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(", ")
+/// A helper struct for displaying a list of items separated by commas
+struct CommaSeparated<'a, T: Display>(&'a [T]);
+
+impl<'a, T: Display> Display for CommaSeparated<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut iter = self.0.iter();
+        if let Some(first) = iter.next() {
+            write!(f, "{}", first)?;
+        }
+        for display in iter {
+            write!(f, ", {}", display)?;
+        }
+        Ok(())
+    }
 }
 
-/// Liveness is displayed in the format L0(T1, T2); L1(T3, T4), ...
+/// Liveness is displayed in the format L0(T1, T2); L1(T3, T4); ...
 impl Display for Liveness {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        // TODO: Can we avoid the allocation here?
         let mut l: [Vec<TransitionId>; 5] = Default::default();
-        for (i, &live) in self.0.iter().enumerate() {
-            l[live as usize].push(TransitionId(i));
+        for (i, live) in self.0.iter().enumerate() {
+            l[*live as usize].push(TransitionId(i));
         }
-        let mut print = Vec::with_capacity(5);
-        fn display_class(name: &'static str, members: &[TransitionId]) -> String {
-            format!("{} ({});", name, comma_separated(members))
+        for (class, transitions) in ["L0", "L1", "L2", "L3", "L4"].iter().zip(&l) {
+            if !transitions.is_empty() {
+                write!(f, "{} ({}); ", class, CommaSeparated(transitions))?;
+            }
         }
-        if !l[0].is_empty() {
-            print.push(display_class("L0", &l[0]));
-        }
-        if !l[1].is_empty() {
-            print.push(display_class("L1", &l[1]));
-        }
-        if !l[2].is_empty() {
-            print.push(display_class("L2", &l[2]));
-        }
-        if !l[3].is_empty() {
-            print.push(display_class("L3", &l[3]));
-        }
-        if !l[4].is_empty() {
-            print.push(display_class("L4", &l[4]));
-        }
-        write!(f, "{}", print.join(" "))
+        Ok(())
     }
 }
 
@@ -192,7 +186,7 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
         transitions
     }
     /// Compute the incidence matrix for detecting unboundedness
-    pub fn incidence_matrix(&self, transition_io: &[TransitionIO]) -> IncidenceMatrix<'_, C, W> {
+    fn incidence_matrix(&self, transition_io: &[TransitionIO]) -> IncidenceMatrix<'_, C, W> {
         let mut matrix: Vec<Vec<isize>> = vec![vec![0; self.transitions.len()]; self.places.len()];
         for (j, transition) in transition_io.iter().enumerate() {
             for &input in &transition.inputs {
@@ -348,11 +342,10 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
                 let places_with_tokens: Vec<(&PlaceId, &usize)> = marking.0.iter()
                     .filter(|(_, &tokens)| tokens > 0)
                     .collect();
-                // A final deadlock has only one place with one token and no outgoing arcs
                 match places_with_tokens.as_slice() {
-                    // A final deadlock must match this pattern:
+                    // A final deadlock marking must contain only one place with one token
                     [(place_id, 1)] if !self.petri_net.arcs.iter().any(|arc| {
-                        // There is no arc with this place as source
+                        // and there must be no outgoing arcs from that place
                         matches!(arc, Arc::PlaceTransition(source, _) if source == *place_id)
                     }) => DeadlockInterpretation::Final,
                     // Otherwise, we have a regular deadlock
@@ -429,7 +422,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
                 write!(f, "{:<5}", marking.get(&place.id))?;
             }
             // Print the transitions which can fire from this marking and the markings they lead to
-            writeln!(f, "{}", comma_separated(continuations))?;
+            writeln!(f, "{}", CommaSeparated(continuations))?;
         }
         writeln!(f)?;
 
@@ -443,7 +436,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
         writeln!(f, "Quasi-Live: {}", self.is_quasi_live())?;
         writeln!(f, "Sound: {}", self.is_sound())?;
         writeln!(f, "Liveness: {}", self.liveness)?;
-        writeln!(f, "Loops: {}", comma_separated(&self.loops()))?;
+        writeln!(f, "Loops: {}", CommaSeparated(&self.loops()))?;
         writeln!(f, "Soundness: {}", self.is_sound())?;
         Ok(())
     }
