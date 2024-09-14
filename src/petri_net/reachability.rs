@@ -164,7 +164,7 @@ impl Display for Liveness {
 /// This allows for easy checking of whether a transition can fire from a given marking
 #[derive(Debug)]
 struct TransitionIO {
-    transition_id: TransitionId,
+    id: TransitionId,
     inputs: Vec<PlaceId>,
     outputs: Vec<PlaceId>,
 }
@@ -206,11 +206,12 @@ pub struct ReachabilityAnalysis<'net, C: CapacityFn, W: WeightFn> {
 
 impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
     /// Create a Vec<TransitionIO> for efficient transition firing
+    /// The indices of the transitions in this vector correspond to the indices of the transitions in the Petri net, and their IDs
     fn transition_io(&self) -> Vec<TransitionIO> {
         let mut transitions = Vec::with_capacity(self.transitions.len());
         // For each transition in the net, collect its ID, input places, and output places
         for transition in &self.transitions {
-            let transition_id = transition.id;
+            let id = transition.id;
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
             for arc in &self.arcs {
@@ -224,15 +225,24 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                     _ => {}
                 }
             }
-            transitions.push(TransitionIO { transition_id, inputs, outputs });
+            transitions.push(TransitionIO { id, inputs, outputs });
         }
         transitions
     }
     /// Compute the incidence matrix for detecting unboundedness
     pub fn incidence_matrix(&self, transition_io: &[TransitionIO]) -> IncidenceMatrix<'_, C, W> {
-        let matrix: Vec<Vec<isize>> = vec![vec![0; self.transitions.len()]; self.places.len()];
-        for _p in &self.places {
-            todo!()
+        let mut matrix: Vec<Vec<isize>> = vec![vec![0; self.transitions.len()]; self.places.len()];
+        for (j, transition) in transition_io.iter().enumerate() {
+            for &input in &transition.inputs {
+                if let Some(i) = self.places.iter().position(|place| place.id == input) {
+                    matrix[i][j] -= self.weights.get(&Arc::PlaceTransition(input, transition.id)) as isize;
+                }
+            }
+            for &output in &transition.outputs {
+                if let Some(i) = self.places.iter().position(|place| place.id == output) {
+                    matrix[i][j] += self.weights.get(&Arc::TransitionPlace(transition.id, output)) as isize;
+                }
+            }
         }
         IncidenceMatrix {
             petri_net: self,
@@ -245,27 +255,27 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
     /// This function also updates the place boundedness and transition liveness.
     #[rustfmt::skip]
     fn fire_transitions(
-        transition_ios: &[TransitionIO],
+        transition_io: &[TransitionIO],
+        marking: &Marking,
         capacities: &C,
         weights: &W,
-        from: &Marking,
         boundedness: &mut Boundedness,
         liveness: &mut LivenessMap,
     ) -> Vec<(TransitionId, Marking)> {
-        transition_ios.iter().filter_map(|TransitionIO { transition_id, inputs, outputs }| {
+        transition_io.iter().filter_map(|transition| {
             // Create a clone of the start marking to modify
-            let mut marking = from.clone();
+            let mut marking = marking.clone();
             // Start by checking that all the input places have sufficient tokens to fire the transition
-            inputs.iter().try_for_each(|source| {
+            transition.inputs.iter().try_for_each(|source| {
                 let current_tokens = marking.get(source);
-                let token_requirement = weights.get(&Arc::PlaceTransition(*source, *transition_id));
+                let token_requirement = weights.get(&Arc::PlaceTransition(*source, transition.id));
                 current_tokens.checked_sub(token_requirement)
                     .map(|new_tokens| marking.set(*source, new_tokens))
                     .ok_or(()) // Produce Ok if tokens were removed, Err if not enough tokens
             // Then check that all outputs have enough capacity to store the new tokens
-            }).and_then(|_| outputs.iter().try_for_each(|target| {
+            }).and_then(|_| transition.outputs.iter().try_for_each(|target| {
                 let current = marking.get(target);
-                let output_tokens = weights.get(&Arc::TransitionPlace(*transition_id, *target));
+                let output_tokens = weights.get(&Arc::TransitionPlace(transition.id, *target));
                 let capacity = capacities.get_or_default(target);
                 capacity.checked_sub(output_tokens)
                     .filter(|&max_current_tokens| current <= max_current_tokens)
@@ -282,8 +292,8 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                 .ok()
                 .map(|_| {
                     // This transition fired successfully, so it must be at least L1-live
-                    liveness.update(*transition_id, Live::L1);
-                    (*transition_id, marking)
+                    liveness.update(transition.id, Live::L1);
+                    (transition.id, marking)
                 })
         }).collect() // Collect all successful firing attempts
     }
@@ -301,9 +311,9 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
             self.initial_marking.clone(),
             PetriNet::fire_transitions(
                 &transition_io,
+                &self.initial_marking,
                 &self.capacities,
                 &self.weights,
-                &self.initial_marking,
                 &mut analysis.boundedness,
                 &mut liveness,
             ),
@@ -319,9 +329,9 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                     let new_marking_id = markings.remember(resulting_marking.clone());
                     let new_branches = PetriNet::fire_transitions(
                         &transition_io,
+                        &resulting_marking,
                         &self.capacities,
                         &self.weights,
-                        &resulting_marking,
                         &mut analysis.boundedness,
                         &mut liveness,
                     );
