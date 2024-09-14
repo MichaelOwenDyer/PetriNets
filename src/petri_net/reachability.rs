@@ -38,18 +38,18 @@ impl Display for Continuation {
 pub struct Boundedness(HashMap<PlaceId, usize>);
 
 impl Boundedness {
-    /// Returns the boundedness of a place, assuming 0 if the place is not in the map
-    fn from_net<C: CapacityFn, W: WeightFn>(net: &PetriNet<C, W>) -> Self {
-        let mut boundedness = HashMap::with_capacity(net.places.len());
+    /// Creates a new Boundedness object with all places in the net set to 0
+    fn new<C: CapacityFn, W: WeightFn>(net: &PetriNet<C, W>) -> Self {
+        let mut map = HashMap::with_capacity(net.places.len());
         // Initialize the boundedness of all places with 0
         for place in &net.places {
-            boundedness.insert(place.id, 0);
+            map.insert(place.id, 0);
         }
         // Update the boundedness with the initial marking
         for (place_id, initial_tokens) in net.initial_marking.0.iter() {
-            boundedness.insert(*place_id, *initial_tokens);
+            map.insert(*place_id, *initial_tokens);
         }
-        Self(boundedness)
+        Self(map)
     }
     /// Updates the boundedness of a place if the new value is greater than the old value
     fn update(&mut self, place_id: PlaceId, tokens: usize) {
@@ -163,7 +163,7 @@ struct TransitionIO {
 /// for efficient transition firing
 #[derive(Debug)]
 struct FiringFn<'net, C: CapacityFn, W: WeightFn> {
-    transitions: Vec<TransitionIO>,
+    transition_ios: Vec<TransitionIO>,
     capacities: &'net C,
     weights: &'net W,
 }
@@ -191,7 +191,7 @@ impl<'net, C: CapacityFn, W: WeightFn> FiringFn<'net, C, W> {
             transitions.push(TransitionIO { transition_id, inputs, outputs });
         }
         Self {
-            transitions,
+            transition_ios: transitions,
             capacities: &petri_net.capacities,
             weights: &petri_net.weights,
         }
@@ -207,7 +207,7 @@ impl<'net, C: CapacityFn, W: WeightFn> FiringFn<'net, C, W> {
         boundedness: &mut Boundedness,
         liveness: &mut LivenessMap,
     ) -> Vec<(TransitionId, Marking)> {
-        self.transitions.iter().filter_map(|TransitionIO { transition_id, inputs, outputs }| {
+        self.transition_ios.iter().filter_map(|TransitionIO { transition_id, inputs, outputs }| {
             // Create a clone of the start marking to modify
             let mut marking = from.clone();
             // Start by checking that all the input places have sufficient tokens to fire the transition
@@ -230,13 +230,16 @@ impl<'net, C: CapacityFn, W: WeightFn> FiringFn<'net, C, W> {
                         marking.set(*target, new_tokens);
                         // Since we are increasing tokens on a place, we need to update the boundedness
                         boundedness.update(*target, new_tokens);
-                    }).ok_or(()) // Produce Ok if tokens were added, Err if not enough capacity
+                    })
+                    .ok_or(()) // Produce Ok if tokens were added, Err if not enough capacity
             // If the transition fired successfully, return its ID and the resulting marking
-            })).ok().map(|_| {
-                // This transition fired successfully, so it must be at least L1-live
-                liveness.update(*transition_id, Live::L1);
-                (*transition_id, marking)
-            })
+            }))
+                .ok()
+                .map(|_| {
+                    // This transition fired successfully, so it must be at least L1-live
+                    liveness.update(*transition_id, Live::L1);
+                    (*transition_id, marking)
+                })
         }).collect() // Collect all successful firing attempts
     }
 }
@@ -347,7 +350,7 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
         Self {
             petri_net,
             graph: Vec::new(),
-            boundedness: Boundedness::from_net(petri_net),
+            boundedness: Boundedness::new(petri_net),
             liveness: Liveness::default(),
         }
     }
