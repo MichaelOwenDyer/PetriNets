@@ -80,49 +80,18 @@ enum Live {
     L4,
 }
 
-/// Intermediate struct to build the liveness of transitions
+/// Liveness is a list of liveness classes for each transition in the Petri net (ID = index)
 #[derive(Debug, Clone)]
-struct LivenessMap {
-    liveness: HashMap<TransitionId, Live>,
-}
+struct Liveness(Vec<Live>);
 
-impl LivenessMap {
+impl Liveness {
     /// Create a new liveness map from a list of transitions
     fn new<C: CapacityFn, W: WeightFn>(net: &PetriNet<C, W>) -> Self {
-        let mut liveness = HashMap::with_capacity(net.transitions.len());
-        // Initialize all transitions with L0
-        for transition in &net.transitions {
-            liveness.insert(transition.id, Live::L0);
-        }
-        Self { liveness }
+        Self(vec![Live::L0; net.transitions.len()])
     }
     /// Updates the liveness of a transition if the new value is greater than the old value
     fn update(&mut self, transition_id: TransitionId, live: Live) {
-        self.liveness
-            .entry(transition_id)
-            .and_modify(|current| {
-                if *current < live {
-                    *current = live;
-                }
-            })
-            .or_insert(live);
-    }
-}
-
-/// Categorizes transitions by liveness
-/// The index of the array corresponds to the liveness class, e.g. 0 -> L0, 1 -> L1, ...
-#[derive(Debug, Clone, Default)]
-pub struct Liveness {
-    l: [Vec<TransitionId>; 5],
-}
-
-impl Liveness {
-    /// Categorizes transitions into their respective liveness classes
-    fn categorize(&mut self, map: LivenessMap) {
-        for (transition_id, live) in map.liveness {
-            // Safety: `live as usize` is always in the range 0..4
-            self.l[live as usize].push(transition_id);
-        }
+        self.0[transition_id.0] = std::cmp::max(self.0[transition_id.0], live);
     }
 }
 
@@ -137,24 +106,28 @@ fn comma_separated<T: Display>(displays: &[T]) -> String {
 /// Liveness is displayed in the format L0(T1, T2); L1(T3, T4), ...
 impl Display for Liveness {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut l: [Vec<TransitionId>; 5] = Default::default();
+        for (i, &live) in self.0.iter().enumerate() {
+            l[live as usize].push(TransitionId(i));
+        }
+        let mut print = Vec::with_capacity(5);
         fn display_class(name: &'static str, members: &[TransitionId]) -> String {
             format!("{} ({});", name, comma_separated(members))
         }
-        let mut print = Vec::with_capacity(5);
-        if !self.l[0].is_empty() {
-            print.push(display_class("L0", &self.l[0]));
+        if !l[0].is_empty() {
+            print.push(display_class("L0", &l[0]));
         }
-        if !self.l[1].is_empty() {
-            print.push(display_class("L1", &self.l[1]));
+        if !l[1].is_empty() {
+            print.push(display_class("L1", &l[1]));
         }
-        if !self.l[2].is_empty() {
-            print.push(display_class("L2", &self.l[2]));
+        if !l[2].is_empty() {
+            print.push(display_class("L2", &l[2]));
         }
-        if !self.l[3].is_empty() {
-            print.push(display_class("L3", &self.l[3]));
+        if !l[3].is_empty() {
+            print.push(display_class("L3", &l[3]));
         }
-        if !self.l[4].is_empty() {
-            print.push(display_class("L4", &self.l[4]));
+        if !l[4].is_empty() {
+            print.push(display_class("L4", &l[4]));
         }
         write!(f, "{}", print.join(" "))
     }
@@ -260,7 +233,7 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
         capacities: &C,
         weights: &W,
         boundedness: &mut Boundedness,
-        liveness: &mut LivenessMap,
+        liveness: &mut Liveness,
     ) -> Vec<(TransitionId, Marking)> {
         transition_io.iter().filter_map(|transition| {
             // Create a clone of the start marking to modify
@@ -300,7 +273,6 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
     /// Perform a reachability analysis on the Petri net
     pub fn reachability_analysis(&self) -> ReachabilityAnalysis<'_, C, W> {
         let mut analysis = ReachabilityAnalysis::new(self);
-        let mut liveness = LivenessMap::new(self);
         let mut markings = Markings::default();
         let id = markings.remember(self.initial_marking.clone());
         let transition_io = self.transition_io();
@@ -315,7 +287,7 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                 &self.capacities,
                 &self.weights,
                 &mut analysis.boundedness,
-                &mut liveness,
+                &mut analysis.liveness,
             ),
         ));
         while let Some((source_marking_id, source_marking, branches_to_explore)) = queue.pop_front() {
@@ -333,7 +305,7 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                         &self.capacities,
                         &self.weights,
                         &mut analysis.boundedness,
-                        &mut liveness,
+                        &mut analysis.liveness,
                     );
                     continuations.push(Continuation::Unseen(transition_id, new_marking_id));
                     queue.push_back((new_marking_id, resulting_marking, new_branches));
@@ -341,7 +313,6 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
             }
             analysis.rows.push((source_marking_id, source_marking, continuations));
         }
-        analysis.liveness.categorize(liveness);
         analysis
     }
 }
@@ -372,7 +343,7 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
             petri_net,
             rows: Vec::new(),
             boundedness: Boundedness::new(petri_net),
-            liveness: Liveness::default(),
+            liveness: Liveness::new(petri_net),
         }
     }
     /// Returns a list of deadlocked markings and their interpretation
@@ -412,16 +383,12 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     }
     /// Returns true if every transition in the Petri net is L4-live
     fn is_live(&self) -> bool {
-        self.liveness.l[0].is_empty()
-            && self.liveness.l[1].is_empty()
-            && self.liveness.l[2].is_empty()
-            && self.liveness.l[3].is_empty()
-            && !self.liveness.l[4].is_empty()
+        self.liveness.0.iter().all(|&live| live == Live::L4)
     }
     /// Returns true if at least one transition in the Petri net is L4-live
     /// and at least one transition is not L4-live
     fn is_quasi_live(&self) -> bool {
-        !self.is_live() && !self.liveness.l[4].is_empty()
+        !self.is_live() && self.liveness.0.iter().any(|&live| live == Live::L4)
     }
     /// Returns the markings from which we can reach a previous marking,
     /// forming a loop in the reachability graph
@@ -441,7 +408,8 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     /// Returns true if all places had at least one token at some point,
     /// and all transitions fired at least once
     fn is_sound(&self) -> bool {
-        self.liveness.l[0].is_empty() && self.boundedness.0.values().all(|&tokens| tokens > 0)
+        self.liveness.0.iter().all(|&live| live != Live::L0)
+            && self.boundedness.0.values().all(|&tokens| tokens > 0)
     }
 }
 
