@@ -35,32 +35,21 @@ impl Display for Continuation {
 
 /// Describes the maximum number of tokens stored on a place at any point in time
 #[derive(Debug, Clone)]
-pub struct Boundedness(HashMap<PlaceId, usize>);
+pub struct Boundedness(Vec<usize>);
 
 impl Boundedness {
     /// Creates a new Boundedness object with all places in the net set to 0
     fn new<C: CapacityFn, W: WeightFn>(net: &PetriNet<C, W>) -> Self {
-        let mut map = HashMap::with_capacity(net.places.len());
-        // Initialize the boundedness of all places with 0
-        for place in &net.places {
-            map.insert(place.id, 0);
-        }
+        let mut vec = vec![0; net.places.len()];
         // Update the boundedness with the initial marking
-        for (place_id, initial_tokens) in net.initial_marking.0.iter() {
-            map.insert(*place_id, *initial_tokens);
+        for (place_id, &initial_tokens) in net.initial_marking.0.iter() {
+            vec[place_id.0] = initial_tokens;
         }
-        Self(map)
+        Self(vec)
     }
     /// Updates the boundedness of a place if the new value is greater than the old value
     fn update(&mut self, place_id: PlaceId, tokens: usize) {
-        self.0
-            .entry(place_id)
-            .and_modify(|t| {
-                if *t < tokens {
-                    *t = tokens;
-                }
-            })
-            .or_insert(tokens);
+        self.0[place_id.0] = std::cmp::max(self.0[place_id.0], tokens);
     }
 }
 
@@ -375,11 +364,11 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     }
     /// Returns the maximum boundedness of any place in the Petri net
     fn boundedness(&self) -> usize {
-        self.boundedness.0.values().copied().max().unwrap_or(0)
+        self.boundedness.0.iter().copied().max().unwrap_or(0)
     }
     /// Returns true if every place in the Petri net is 1-bounded
     fn is_safe(&self) -> bool {
-        self.boundedness.0.iter().all(|(_, &tokens)| tokens == 1)
+        self.boundedness.0.iter().all(|&bound| bound == 1)
     }
     /// Returns true if every transition in the Petri net is L4-live
     fn is_live(&self) -> bool {
@@ -409,7 +398,7 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     /// and all transitions fired at least once
     fn is_sound(&self) -> bool {
         self.liveness.0.iter().all(|&live| live != Live::L0)
-            && self.boundedness.0.values().all(|&tokens| tokens > 0)
+            && self.boundedness.0.iter().all(|&bound| bound > 0)
     }
 }
 
