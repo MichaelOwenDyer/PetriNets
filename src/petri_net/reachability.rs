@@ -2,7 +2,7 @@
 
 use super::{Arc, CapacityFn, Marking, MarkingFn, PetriNet, PlaceId, TransitionId, WeightFn};
 use std::collections::{HashMap, VecDeque};
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 
 /// A unique ID for a marking in the reachability graph
 #[derive(Debug, Clone, Copy)]
@@ -10,7 +10,7 @@ pub struct MarkingId(usize);
 
 /// Marking IDs are displayed as M followed by the ID padded by 3 leading 0s, e.g. M000, M001, M002, ...
 impl Display for MarkingId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "M{}", self.0)
     }
 }
@@ -18,18 +18,12 @@ impl Display for MarkingId {
 /// A continuation is a transition that can be fired from a marking, resulting in a new marking
 /// If the resulting marking has been seen before, the continuation might be a loop
 #[derive(Debug, Clone, Copy)]
-pub enum Continuation {
-    Unseen(TransitionId, MarkingId),
-    Seen(TransitionId, MarkingId),
-}
+pub struct Continuation(TransitionId, MarkingId);
 
 /// Display a continuation as T->M, e.g. T0->M000, T1->M001, ...
 impl Display for Continuation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Continuation::Unseen(transition, marking) => write!(f, "{}->{}", transition, marking),
-            Continuation::Seen(transition, marking) => write!(f, "{}->{}", transition, marking),
-        }
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        write!(f, "{}->{}", self.0, self.1)
     }
 }
 
@@ -83,17 +77,17 @@ impl Liveness {
     }
 }
 
-/// A helper struct for displaying a list of items separated by commas
-struct CommaSeparated<'a, T: Display>(&'a [T]);
+/// A helper struct for displaying a list of items separated by a delimiter
+struct Join<'a, T: Display>(&'a [T], &'a str);
 
-impl<'a, T: Display> Display for CommaSeparated<'a, T> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+impl<'a, T: Display> Display for Join<'a, T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let mut iter = self.0.iter();
         if let Some(first) = iter.next() {
             write!(f, "{}", first)?;
         }
-        for display in iter {
-            write!(f, ", {}", display)?;
+        for item in iter {
+            write!(f, "{}{}", self.1, item)?;
         }
         Ok(())
     }
@@ -101,18 +95,25 @@ impl<'a, T: Display> Display for CommaSeparated<'a, T> {
 
 /// Liveness is displayed in the format L0(T1, T2); L1(T3, T4); ...
 impl Display for Liveness {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        // TODO: Can we avoid the allocation here?
-        let mut l: [Vec<TransitionId>; 5] = Default::default();
-        for (i, live) in self.0.iter().enumerate() {
-            l[*live as usize].push(TransitionId(i));
-        }
-        for (class, transitions) in ["L0", "L1", "L2", "L3", "L4"].iter().zip(&l) {
-            if !transitions.is_empty() {
-                write!(f, "{} ({}); ", class, CommaSeparated(transitions))?;
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        struct LivenessClass(&'static str, Vec<TransitionId>);
+        impl Display for LivenessClass {
+            fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+                write!(f, "{} ({})", self.0, Join(&self.1, ", "))
             }
         }
-        Ok(())
+        // TODO: Can we avoid using vec here?
+        let mut l = [
+            LivenessClass("L0", vec![]),
+            LivenessClass("L1", vec![]),
+            LivenessClass("L2", vec![]),
+            LivenessClass("L3", vec![]),
+            LivenessClass("L4", vec![]),
+        ];
+        for (i, live) in self.0.iter().enumerate() {
+            l[*live as usize].1.push(TransitionId(i));
+        }
+        write!(f, "{}", Join(&l, "; "))
     }
 }
 
@@ -279,9 +280,13 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                 if let Some(existing_marking_id) = markings.look_up(&resulting_marking) {
                     // TODO: Fix loop detection (find path from marking to itself)
                     // TODO: Detect L3/L4 transitions
-                    continuations.push(Continuation::Seen(transition_id, existing_marking_id));
+                    // If we have seen this marking before, don't explore it again
+                    continuations.push(Continuation(transition_id, existing_marking_id));
                 } else {
+                    // If we have not seen this marking before, remember it and explore it
                     let new_marking_id = markings.remember(resulting_marking.clone());
+                    continuations.push(Continuation(transition_id, new_marking_id));
+                    // Fire all enabled transitions from the new marking
                     let new_branches = PetriNet::fire_transitions(
                         &transition_io,
                         &resulting_marking,
@@ -290,7 +295,6 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
                         &mut analysis.boundedness,
                         &mut analysis.liveness,
                     );
-                    continuations.push(Continuation::Unseen(transition_id, new_marking_id));
                     queue.push_back((new_marking_id, resulting_marking, new_branches));
                 }
             }
@@ -311,7 +315,7 @@ pub enum DeadlockInterpretation {
 
 /// Display a deadlock interpretation as "final" or "deadlock"
 impl Display for DeadlockInterpretation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             DeadlockInterpretation::Final => write!(f, "final"),
             DeadlockInterpretation::Deadlock => write!(f, "deadlock"),
@@ -375,17 +379,7 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     /// Returns the markings from which we can reach a previous marking,
     /// forming a loop in the reachability graph
     fn loops(&self) -> Vec<MarkingId> {
-        self.rows
-            .iter()
-            .flat_map(|(marking_id, _, continuations)| {
-                continuations
-                    .iter()
-                    .filter_map(|continuation| match continuation {
-                        Continuation::Seen(_, _) => Some(*marking_id),
-                        _ => None,
-                    })
-            })
-            .collect()
+        vec![] // TODO: Implement loop detection
     }
     /// Returns true if all places had at least one token at some point,
     /// and all transitions fired at least once
@@ -397,7 +391,7 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
 
 /// Display a reachability analysis as a table
 impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C, W> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         // Print all transitions and their names
         for transition in &self.petri_net.transitions {
             writeln!(f, "{} ... {}", transition.id, transition.name)?;
@@ -422,7 +416,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
                 write!(f, "{:<5}", marking.get(&place.id))?;
             }
             // Print the transitions which can fire from this marking and the markings they lead to
-            writeln!(f, "{}", CommaSeparated(continuations))?;
+            writeln!(f, "{}", Join(continuations, ", "))?;
         }
         writeln!(f)?;
 
@@ -436,7 +430,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
         writeln!(f, "Quasi-Live: {}", self.is_quasi_live())?;
         writeln!(f, "Sound: {}", self.is_sound())?;
         writeln!(f, "Liveness: {}", self.liveness)?;
-        writeln!(f, "Loops: {}", CommaSeparated(&self.loops()))?;
+        writeln!(f, "Loops: {}", Join(&self.loops(), ", "))?;
         writeln!(f, "Soundness: {}", self.is_sound())?;
         Ok(())
     }
