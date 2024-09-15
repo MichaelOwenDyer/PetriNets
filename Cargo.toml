@@ -3,6 +3,9 @@ name = "petri_nets"
 version = "0.1.0"
 edition = "2021"
 
+[profile.release]
+lto = true
+
 [dependencies]
 quick-xml = { version = "0.36.1", features = ["serialize", "overlapped-lists"] }
 serde = { version = "1.0.210", features = ["derive"] }
