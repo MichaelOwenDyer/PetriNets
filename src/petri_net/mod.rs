@@ -1,5 +1,12 @@
 //! This module defines the data structures for Petri nets
 //! and provides a conversion from BPMN diagrams to Petri nets.
+//!
+//! The following paper is used as a reference and inspiration for the implementation:
+//! [T. Murata. Petri nets: Properties, Analysis and Applications. Proceedings of the IEEE, 77(4):541–580, 1989.](http://www2.ing.unipi.it/~a009435/issw/extra/murata.pdf)
+//!
+//! TODO:
+//!
+//! - [ ] Use a tree structure for tracking marking sequences and detecting loops / unboundedness
 
 mod reachability;
 mod parse;
@@ -84,132 +91,186 @@ pub struct Transition {
 /// An arc connects a place to a transition or a transition to a place
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Arc {
-    PlaceTransition(PlaceId, TransitionId),
-    TransitionPlace(TransitionId, PlaceId),
+    PlaceTransition(PlaceId, TransitionId), // Inputs to transitions
+    TransitionPlace(TransitionId, PlaceId), // Outputs from transitions
 }
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Tokens(pub usize);
 
 /// A marking function is a mapping from place IDs to the number of tokens in each place
 /// It is used to keep track of the current state of the Petri net
 pub trait MarkingFn: Clone + Eq + Hash {
     /// Get the marking at a place
-    fn get(&self, id: &PlaceId) -> usize;
+    fn get(&self, id: &PlaceId) -> Tokens;
     /// Set the marking at a place
-    fn set(&mut self, id: PlaceId, marking: usize);
+    fn set(&mut self, id: PlaceId, tokens: Tokens);
 }
 
 /// A marking function which is implemented as a BTreeMap (due to its consistent ordering and hashing properties)
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-pub struct Marking(BTreeMap<PlaceId, usize>);
+pub struct Marking(BTreeMap<PlaceId, Tokens>);
 
 impl MarkingFn for Marking {
-    fn get(&self, id: &PlaceId) -> usize {
+    fn get(&self, id: &PlaceId) -> Tokens {
         // If the place is not in the marking, we assume it has 0 tokens
-        self.0.get(id).copied().unwrap_or(0)
+        self.0.get(id).copied().unwrap_or_default()
     }
-    fn set(&mut self, id: PlaceId, marking: usize) {
-        // If the marking is 0, we remove the place from the marking
-        // We only store places with a marking > 0
-        if marking == 0 {
+    fn set(&mut self, id: PlaceId, tokens: Tokens) {
+        // Internal implementation detail:
+        // We only store places with non-zero tokens in the BTreeMap
+        if tokens.0 == 0 {
             self.0.remove(&id);
         } else {
-            self.0.insert(id, marking);
+            self.0.insert(id, tokens);
         }
     }
 }
+
+impl<P: Into<PlaceId>, T: Into<Tokens>> FromIterator<(P, T)> for Marking {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = (P, T)>,
+    {
+        let mut marking = Marking::default();
+        for (id, tokens) in iter {
+            marking.set(id.into(), tokens.into());
+        }
+        marking
+    }
+}
+
+impl Marking {
+    pub fn covered_by(&self, other: &Self) -> bool {
+        self.0.iter().all(|(id, own_tokens)| other.get(id).0 >= own_tokens.0)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Capacity(pub usize); // TODO: Investigate whether it is worthwhile to use an enum variant for infinite capacity instead of usize::MAX
 
 /// A capacity function which can be set for each place individually.
 /// The standard capacity is 1 for EC nets and infinite for PT nets.
 pub trait CapacityFn {
-    const DEFAULT: usize;
-    /// Get the capacity of the place if it differs from the default capacity
-    fn get(&self, _id: &PlaceId) -> Option<usize> {
-        None
-    }
-    /// Get the capacity of the place or the default capacity if it is not set
-    fn get_or_default(&self, id: &PlaceId) -> usize {
+    const DEFAULT: Capacity;
+    /// Get the capacity of the place if it is explicitly marked
+    fn get(&self, _id: &PlaceId) -> Option<Capacity>;
+    /// Get the capacity of the place or the default capacity if it is implicit
+    fn get_or_default(&self, id: &PlaceId) -> Capacity {
         self.get(id).unwrap_or(Self::DEFAULT)
-    }
-    /// Set the capacity of the place, if supported. This is a no-op for EC nets.
-    fn set(&mut self, _id: PlaceId, _capacity: usize) {
-
     }
 }
 
-/// A capacity function which returns a constant capacity of N for all places
+/// A capacity function which returns a constant implicit capacity of 1 for all places
 #[derive(Debug, Default, Clone)]
-pub struct ConstantCapacity<const N: usize>;
+pub struct FixedCapacity<const N: usize = 1>;
 
-impl<const N: usize> CapacityFn for ConstantCapacity<N> {
-    const DEFAULT: usize = N;
+impl<const N: usize> CapacityFn for FixedCapacity<N> {
+    const DEFAULT: Capacity = Capacity(N);
+    fn get(&self, _id: &PlaceId) -> Option<Capacity> {
+        None
+    }
+}
+
+impl<P: Into<PlaceId>, C: Into<Capacity>, const N: usize> FromIterator<(P, C)> for FixedCapacity<N> {
+    /// FixedCapacity does not store any data, so we ignore the input and always return the same instance
+    fn from_iter<I: IntoIterator<Item=(P, C)>>(_: I) -> Self {
+        FixedCapacity
+    }
 }
 
 /// A capacity function which can be set for each place individually.
-/// The default capacity is the const type parameter `N`.
+/// The default capacity is generally infinite (usize::MAX), but can be set via N explicitly.
 #[derive(Debug, Default, Clone)]
-pub struct VariableCapacity<const N: usize> {
-    capacities: HashMap<PlaceId, usize>,
+pub struct VariableCapacity<const N: usize = { usize::MAX }> {
+    capacities: HashMap<PlaceId, Capacity, ahash::RandomState>,
 }
 
 impl<const N: usize> CapacityFn for VariableCapacity<N> {
-    const DEFAULT: usize = N;
-    fn get(&self, id: &PlaceId) -> Option<usize> {
+    const DEFAULT: Capacity = Capacity(N);
+    fn get(&self, id: &PlaceId) -> Option<Capacity> {
         self.capacities.get(id).copied()
     }
-    fn set(&mut self, id: PlaceId, capacity: usize) {
-        if capacity == N {
-            self.capacities.remove(&id);
-        } else {
-            self.capacities.insert(id, capacity);
-        }
+}
+
+impl<P: Into<PlaceId>, C: Into<Capacity>, const N: usize> FromIterator<(P, C)> for VariableCapacity<N> {
+    fn from_iter<I: IntoIterator<Item=(P, C)>>(iter: I) -> Self {
+        let capacities = iter
+            .into_iter()
+            .map(|(id, capacity)| (id.into(), capacity.into()))
+            .filter(|(_, capacity)| capacity.0 != N) // Filter out default capacities
+            .collect();
+        VariableCapacity { capacities }
     }
 }
+
+#[derive(Debug, Clone, Default, Copy, PartialEq, Eq)]
+pub struct Weight(pub usize);
 
 /// A weight function which can be set for each arc individually.
 /// This affects how many tokens are consumed from a source place,
 /// and how many tokens are added to a target place when a transition is fired.
 pub trait WeightFn {
-    /// Get the weight of the arc
-    fn get(&self, _arc: &Arc) -> usize;
-    /// Set the weight of the arc, if supported
-    fn set(&mut self, _arc: Arc, _weight: usize) {
-
+    const DEFAULT: Weight = Weight(1); // Default weight is generally 1 for any kind of petri net
+    /// Get the weight of the arc if it is explicitly set
+    fn get(&self, _arc: &Arc) -> Option<Weight>;
+    /// Return the weight of the arc or 1 if it is not explicitly set
+    fn get_or_default(&self, arc: &Arc) -> Weight {
+        self.get(arc).unwrap_or(Self::DEFAULT)
     }
 }
 
-/// A weight function which returns a constant weight of N for all arcs.
-#[derive(Debug, Default, Clone)]
-pub struct ConstantWeight<const N: usize>;
+/// A weight function which returns a constant implicit weight of N (default: 1) for all arcs.
+#[derive(Debug, Clone, Default)]
+pub struct FixedWeight<const N: usize = 1>;
 
-impl<const N: usize> WeightFn for ConstantWeight<N> {
-    fn get(&self, _arc: &Arc) -> usize {
-        N
+impl<const N: usize> WeightFn for FixedWeight<N> {
+    const DEFAULT: Weight = Weight(N);
+    fn get(&self, _arc: &Arc) -> Option<Weight> {
+        None
+    }
+}
+
+impl<A: Into<Arc>, W: Into<Weight>, const N: usize> FromIterator<(A, W)> for FixedWeight<N> {
+    /// FixedWeight does not store any data, so we ignore the input and always return the same instance
+    fn from_iter<I: IntoIterator<Item=(A, W)>>(_: I) -> Self {
+        FixedWeight
     }
 }
 
 /// A weight function which can be set for each arc individually.
-/// The default weight is the const type parameter `DEFAULT`.
-#[derive(Debug, Default, Clone)]
-pub struct VariableWeight<const N: usize> {
-    weights: HashMap<Arc, usize>,
+/// The default weight is generally 1, but can be set via N explicitly.
+#[derive(Debug, Clone, Default)]
+pub struct VariableWeight<const N: usize = 1> {
+    weights: HashMap<Arc, Weight, ahash::RandomState>,
 }
 
 impl<const N: usize> WeightFn for VariableWeight<N> {
-    fn get(&self, arc: &Arc) -> usize {
-        self.weights.get(arc).copied().unwrap_or(N)
-    }
-    fn set(&mut self, arc: Arc, weight: usize) {
-        if weight == N {
-            self.weights.remove(&arc);
-        } else {
-            self.weights.insert(arc, weight);
-        }
+    const DEFAULT: Weight = Weight(N);
+    fn get(&self, arc: &Arc) -> Option<Weight> {
+        self.weights.get(arc).copied()
     }
 }
 
-/// A Petri net is a tuple P = (P, T, F, C, W, M_0)
-/// where P is a set of places, T is a set of transitions, F is a set of arcs,
-/// C is a capacity function, W is a weight function, and M_0 is the initial marking.
-///
+impl<A: Into<Arc>, W: Into<Weight>, const N: usize> FromIterator<(A, W)> for VariableWeight<N> {
+    fn from_iter<I: IntoIterator<Item=(A, W)>>(iter: I) -> Self {
+        let weights = iter
+            .into_iter()
+            .map(|(arc, weight)| (arc.into(), weight.into()))
+            .filter(|(_, weight)| weight.0 != N) // Filter out default weights
+            .collect();
+        VariableWeight { weights }
+    }
+}
+
+/// A Petri net is a tuple P = (P, T, F, C, W, M_0) where
+///     P is a set of places,
+///     T is a set of transitions,
+///     F is a set of arcs,
+///     C is a capacity function,
+///     W is a weight function,
+///     M_0 is the initial marking.
+/// TODO: Separate initial marking from the Petri net?
 /// This struct is generic over the capacity function C and the weight function W.
 #[derive(Debug, Clone, Default)]
 pub struct PetriNet<C: CapacityFn, W: WeightFn> {
@@ -222,10 +283,10 @@ pub struct PetriNet<C: CapacityFn, W: WeightFn> {
     pub initial_marking: Marking,
 }
 
-/// An ECNet is a Petri net with a fixed capacity of 1 for all places and a fixed weight of 1 for all arcs
-pub type ECNet = PetriNet<ConstantCapacity<1>, ConstantWeight<1>>;
+/// An Event/Condition Net (EC Net) has a fixed capacity of 1 for all places and a fixed weight of 1 for all arcs
+pub type ECNet = PetriNet<FixedCapacity<1>, FixedWeight<1>>;
 
-/// A PTNet is a Petri net with variable capacities and weights (defaulting to infinite and 1, respectively)
+/// A Place/Transition Net (PT Net) has settable, implicitly infinite capacities and settable, implicitly single weights
 pub type PTNet = PetriNet<VariableCapacity<{ usize::MAX }>, VariableWeight<1>>;
 
 /// Display a PetriNet as PNML XML
@@ -241,72 +302,71 @@ where
     }
 }
 
-/// In order to produce unique IDs for places and transitions, we use a factory
-/// This factory keeps track of the next available ID for each type of element
-#[derive(Debug, Default)]
-struct ElementFactory {
-    next_place_id: usize,
-    next_transition_id: usize,
-}
-
-impl ElementFactory {
-    /// Create a new place with a unique ID and the provided name and initial marking
-    fn new_place(&mut self, name: String) -> Place {
-        let place = Place {
-            id: PlaceId(self.next_place_id),
-            name,
-        };
-        self.next_place_id += 1;
-        place
-    }
-    /// Create a new transition with a unique ID and the provided name
-    fn new_transition(&mut self, name: String) -> Transition {
-        let transition = Transition {
-            id: TransitionId(self.next_transition_id),
-            name,
-        };
-        self.next_transition_id += 1;
-        transition
-    }
-}
-
-/// A Petri net element can be either a place or a transition
-#[derive(Debug, Clone)]
-enum Element {
-    Place(Place),
-    Transition(Transition),
-}
-
-/// Convert from Bpmn to PetriNet
-/// This conversion still has some issues, e.g. 
-/// connecting tasks via many buffer places when there should only be one shared buffer place
 impl<C, W> From<Bpmn> for PetriNet<C, W>
 where
     C: CapacityFn + Default,
     W: WeightFn + Default,
 {
     fn from(bpmn: Bpmn) -> Self {
+        /// A Petri net element can be either a place or a transition
+        #[derive(Debug, Clone)]
+        enum Element {
+            Place(Place),
+            Transition(Transition),
+        }
+
+        /// In order to produce unique IDs for places and transitions, we use a factory
+        /// This factory keeps track of the next available ID for each type of element
+        #[derive(Debug, Default)]
+        struct ElementFactory {
+            next_place_id: usize,
+            next_transition_id: usize,
+        }
+
+        impl ElementFactory {
+            /// Create a new place with a unique ID and the provided name and initial marking
+            fn new_place(&mut self, name: String) -> Place {
+                let place = Place {
+                    id: PlaceId(self.next_place_id),
+                    name,
+                };
+                self.next_place_id += 1;
+                place
+            }
+            /// Create a new transition with a unique ID and the provided name
+            fn new_transition(&mut self, name: String) -> Transition {
+                let transition = Transition {
+                    id: TransitionId(self.next_transition_id),
+                    name,
+                };
+                self.next_transition_id += 1;
+                transition
+            }
+        }
+        
         let mut factory = ElementFactory::default();
         let mut initial_marking = Marking::default();
 
-        // Create a mapping from BPMN IDs to corresponding Petri net elements
+        // Create petri net elements for each BPMN element so we can refer to them later
         let mut petri_net_elements = HashMap::with_capacity(bpmn.elements.len());
         for element in &bpmn.elements {
             let petri_net_element = match &element.element_type {
+                // Start events become places with an initial marking of 1
                 B::StartEvent => {
                     let place = factory.new_place(element.name.clone());
                     // Note down the initial marking of the start place
-                    initial_marking.set(place.id, 1);
+                    initial_marking.set(place.id, Tokens(1));
                     Element::Place(place)
                 }
-                B::EndEvent => Element::Place(factory.new_place(element.name.clone())),
-                B::Task => Element::Transition(factory.new_transition(element.name.clone())),
-                B::ParallelGateway => Element::Transition(factory.new_transition(element.name.clone())),
-                B::ExclusiveGateway => Element::Place(factory.new_place(element.name.clone())),
+                // End events and XOR gateways become places
+                B::EndEvent | B::ExclusiveGateway => Element::Place(factory.new_place(element.name.clone())),
+                // Tasks and parallel gateways become transitions
+                B::Task | B::ParallelGateway => Element::Transition(factory.new_transition(element.name.clone())),
             };
             petri_net_elements.insert(element.id.clone(), petri_net_element);
         }
 
+        // Can we come to a more accurate estimate of the number of places and transitions?
         let mut places = Vec::with_capacity(petri_net_elements.len());
         let mut transitions = Vec::with_capacity(petri_net_elements.len());
         let mut arcs = Vec::with_capacity(petri_net_elements.len());
@@ -314,50 +374,43 @@ where
         // Now we can iterate over the converted elements and create the petri net
         for element in &bpmn.elements {
             // Add the petri net element to the appropriate list and get its ID
-            let mut this = match petri_net_elements.get(&element.id) {
-                Some(this) => this,
-                None => continue, // Unknown element, skip (should not happen)
-            };
+            // The .expect() calls are safe because we just inserted the element into the map
+            // Still, it would be nice to avoid them...
+            let this = petri_net_elements.get(&element.id).expect("Element should exist");
 
             let inputs = element.incoming_edges
                 .iter()
-                .filter_map(|edge| petri_net_elements.get(&edge.source_id))
+                .map(|edge| petri_net_elements.get(&edge.source_id).expect("Element should exist"))
                 .collect::<Vec<_>>(); // Collect all incoming elements
 
+            // Iterate over the BPMN elements which are inputs to this one, and figure out
+            // how to connect them to the corresponding petri net element
             for input in inputs {
-                match (input, &mut this) {
-                    (
-                        Element::Place(source),
-                        Element::Transition(target),
-                    ) => {
-                        // Connect directly
+                match (input, this) {
+                    (Element::Place(source), Element::Transition(target)) => {
                         arcs.push(Arc::PlaceTransition(source.id, target.id));
                     }
-                    (
-                        Element::Place(source),
-                        Element::Place(target),
-                    ) => {
+                    (Element::Place(source), Element::Place(target)) => {
                         // Create a silent transition to connect via
                         let tau = factory.new_transition(String::new());
                         arcs.push(Arc::PlaceTransition(source.id, tau.id));
                         arcs.push(Arc::TransitionPlace(tau.id, target.id));
                         transitions.push(tau);
                     }
-                    ( // TODO: Only tasks should behave like this, parallel gateways should not
-                        Element::Transition(source),
-                        Element::Transition(target),
-                    ) => {
-                        // Create a new buffer place to connect via
+                    (Element::Transition(source), Element::Transition(target)) => {
+                        // This is an oversimplification.
+                        // This assumes that any connected BPMN elements which become transitions
+                        // (e.g. tasks and parallel gateways) should be connected via a new place.
+                        // In some cases though, all source transitions should point into a shared
+                        // buffer place, so as to require only one of them to fire in order to enable
+                        // the target transition, rather than requiring all of them to fire.
+                        // TODO: Investigate when to use shared buffer places and when to use separate buffer places
                         let buffer = factory.new_place(String::new());
                         arcs.push(Arc::TransitionPlace(source.id, buffer.id));
                         arcs.push(Arc::PlaceTransition(buffer.id, target.id));
                         places.push(buffer);
                     }
-                    (
-                        Element::Transition(source),
-                        Element::Place(target),
-                    ) => {
-                        // Connect directly
+                    (Element::Transition(source), Element::Place(target)) => {
                         arcs.push(Arc::TransitionPlace(source.id, target.id));
                     }
                 }
@@ -385,9 +438,9 @@ where
             places,
             transitions,
             arcs,
-            initial_marking,
             capacities,
             weights,
+            initial_marking,
         }
     }
 }

@@ -17,7 +17,6 @@ pub struct IncomingEdge {
     /// The ID of the source element
     pub source_id: String,
     /// The writing on the edge (currently lost in the conversion to Petri net)
-    #[expect(unused)]
     pub inscription: String,
 }
 

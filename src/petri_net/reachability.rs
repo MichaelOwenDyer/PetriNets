@@ -1,6 +1,7 @@
 //! This module performs reachability analysis on a Petri net
 
-use super::{Arc, CapacityFn, Marking, MarkingFn, PetriNet, PlaceId, TransitionId, WeightFn};
+use super::{Arc, CapacityFn, Marking, MarkingFn, PetriNet, PlaceId, Tokens, TransitionId, WeightFn};
+use std::cmp::Ordering;
 use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter, Result as FmtResult};
 
@@ -27,27 +28,61 @@ impl Display for Continuation {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    Bounded(Tokens),
+    #[expect(unused)] // Will be unused until unboundedness checking is implemented
+    Unbounded,
+}
+
+impl PartialOrd for Bound {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Bound {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Bound::Bounded(a), Bound::Bounded(b)) => a.cmp(b),
+            (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
+            (Bound::Bounded(_), Bound::Unbounded) => Ordering::Greater,
+            (Bound::Unbounded, Bound::Bounded(_)) => Ordering::Less,
+        }
+    }
+}
+
+impl Display for Bound {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        match self {
+            Bound::Bounded(tokens) => write!(f, "{}-Bounded", tokens.0),
+            Bound::Unbounded => write!(f, "Unbounded"),
+        }
+    }
+}
+
 /// Describes the maximum number of tokens stored on a place at any point in time
 #[derive(Debug, Clone)]
-pub struct Boundedness(Vec<usize>);
+pub struct Boundedness(Vec<Bound>);
 
 impl Boundedness {
     /// Creates a new Boundedness object with all places in the net set to 0
     fn new<C: CapacityFn, W: WeightFn>(net: &PetriNet<C, W>) -> Self {
-        let mut vec = vec![0; net.places.len()];
+        let mut vec = vec![Bound::Bounded(Tokens(0)); net.places.len()];
         // Update the boundedness with the initial marking
         for (place_id, &initial_tokens) in net.initial_marking.0.iter() {
-            vec[place_id.0] = initial_tokens;
+            vec[place_id.0] = Bound::Bounded(initial_tokens);
         }
         Self(vec)
     }
     /// Updates the boundedness of a place if the new value is greater than the old value
-    fn update(&mut self, place_id: PlaceId, tokens: usize) {
-        self.0[place_id.0] = std::cmp::max(self.0[place_id.0], tokens);
+    fn update(&mut self, place_id: PlaceId, bound: Bound) {
+        self.0[place_id.0] = std::cmp::max(self.0[place_id.0], bound);
     }
 }
 
 /// Transition liveness classes describe how many times a transition fires
+/// TODO: Copy definitions from paper
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Live {
     /// Can never fire
@@ -102,7 +137,7 @@ impl Display for Liveness {
                 write!(f, "{} ({})", self.0, Join(&self.1, ", "))
             }
         }
-        // TODO: Can we avoid using vec here?
+        // TODO: Can we avoid allocating here?
         let mut l = [
             LivenessClass("L0", vec![]),
             LivenessClass("L1", vec![]),
@@ -110,8 +145,8 @@ impl Display for Liveness {
             LivenessClass("L3", vec![]),
             LivenessClass("L4", vec![]),
         ];
-        for (i, live) in self.0.iter().enumerate() {
-            l[*live as usize].1.push(TransitionId(i));
+        for (i, &live) in self.0.iter().enumerate() {
+            l[live as usize].1.push(TransitionId(i));
         }
         write!(f, "{}", Join(&l, "; "))
     }
@@ -127,9 +162,10 @@ struct TransitionIO {
 }
 
 /// Struct for keeping track of the markings we have seen before and their IDs
+/// TODO: Change out the HashMap for a tree-like data structure for tracking paths
 #[derive(Debug, Default)]
 struct Markings {
-    markings: HashMap<Marking, MarkingId>,
+    markings: HashMap<Marking, MarkingId, ahash::RandomState>,
 }
 
 impl Markings {
@@ -162,7 +198,7 @@ pub struct ReachabilityAnalysis<'net, C: CapacityFn, W: WeightFn> {
 }
 
 impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
-    /// Create a Vec<TransitionIO> for efficient transition firing
+    /// Create a Vec<TransitionIO> for efficient transition firing.
     /// The indices of the transitions in this vector correspond to the indices of the transitions in the Petri net, and their IDs
     fn transition_io(&self) -> Vec<TransitionIO> {
         let mut transitions = Vec::with_capacity(self.transitions.len());
@@ -172,12 +208,12 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
             let mut inputs = Vec::new();
             let mut outputs = Vec::new();
             for arc in &self.arcs {
-                match arc {
-                    Arc::PlaceTransition(source, target) if target == &transition.id => {
-                        inputs.push(*source);
+                match *arc {
+                    Arc::PlaceTransition(source, target) if target == transition.id => {
+                        inputs.push(source);
                     }
-                    Arc::TransitionPlace(source, target) if source == &transition.id => {
-                        outputs.push(*target);
+                    Arc::TransitionPlace(source, target) if source == transition.id => {
+                        outputs.push(target);
                     }
                     _ => {}
                 }
@@ -192,12 +228,12 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
         for (j, transition) in transition_io.iter().enumerate() {
             for &input in &transition.inputs {
                 if let Some(i) = self.places.iter().position(|place| place.id == input) {
-                    matrix[i][j] -= self.weights.get(&Arc::PlaceTransition(input, transition.id)) as isize;
+                    matrix[i][j] -= self.weights.get_or_default(&Arc::PlaceTransition(input, transition.id)).0 as isize;
                 }
             }
             for &output in &transition.outputs {
                 if let Some(i) = self.places.iter().position(|place| place.id == output) {
-                    matrix[i][j] += self.weights.get(&Arc::TransitionPlace(transition.id, output)) as isize;
+                    matrix[i][j] += self.weights.get_or_default(&Arc::TransitionPlace(transition.id, output)).0 as isize;
                 }
             }
         }
@@ -223,25 +259,25 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
             // Create a clone of the start marking to modify
             let mut marking = marking.clone();
             // Start by checking that all the input places have sufficient tokens to fire the transition
-            transition.inputs.iter().try_for_each(|source| {
-                let current_tokens = marking.get(source);
-                let token_requirement = weights.get(&Arc::PlaceTransition(*source, transition.id));
+            transition.inputs.iter().try_for_each(|&source_place| {
+                let current_tokens = marking.get(&source_place).0;
+                let token_requirement = weights.get_or_default(&Arc::PlaceTransition(source_place, transition.id)).0;
                 current_tokens.checked_sub(token_requirement)
-                    .map(|new_tokens| marking.set(*source, new_tokens))
+                    .map(|new_tokens| marking.set(source_place, Tokens(new_tokens)))
                     .ok_or(()) // Produce Ok if tokens were removed, Err if not enough tokens
             // Then check that all outputs have enough capacity to store the new tokens
-            }).and_then(|_| transition.outputs.iter().try_for_each(|target| {
-                let current = marking.get(target);
-                let output_tokens = weights.get(&Arc::TransitionPlace(transition.id, *target));
-                let capacity = capacities.get_or_default(target);
-                capacity.checked_sub(output_tokens)
-                    .filter(|&max_current_tokens| current <= max_current_tokens)
+            }).and_then(|_| transition.outputs.iter().try_for_each(|&target_place| {
+                let current_tokens = marking.get(&target_place).0;
+                let output_weight = weights.get_or_default(&Arc::TransitionPlace(transition.id, target_place)).0;
+                let capacity = capacities.get_or_default(&target_place).0;
+                capacity.checked_sub(output_weight)
+                    .filter(|&max_current_tokens| current_tokens <= max_current_tokens)
                     .map(|_| {
-                        let new_tokens = current + output_tokens;
+                        let new_tokens = Tokens(current_tokens + output_weight);
                         // If so, add the tokens to the target place
-                        marking.set(*target, new_tokens);
+                        marking.set(target_place, new_tokens);
                         // Since we are increasing tokens on a place, we need to update the boundedness
-                        boundedness.update(*target, new_tokens);
+                        boundedness.update(target_place, Bound::Bounded(new_tokens));
                     })
                     .ok_or(()) // Produce Ok if tokens were added, Err if not enough capacity
             // If the transition fired successfully, return its ID and the resulting marking
@@ -343,14 +379,14 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
             // Interpret the deadlock
             let interpretation = {
                 // Find all places with tokens
-                let places_with_tokens: Vec<(&PlaceId, &usize)> = marking.0.iter()
-                    .filter(|(_, &tokens)| tokens > 0)
+                let places_with_tokens: Vec<(&PlaceId, &Tokens)> = marking.0.iter()
+                    .filter(|(_, &tokens)| tokens.0 > 0)
                     .collect();
                 match places_with_tokens.as_slice() {
                     // A final deadlock marking must contain only one place with one token
-                    [(place_id, 1)] if !self.petri_net.arcs.iter().any(|arc| {
+                    &[(place_id, Tokens(1))] if !self.petri_net.arcs.iter().any(|arc| {
                         // and there must be no outgoing arcs from that place
-                        matches!(arc, Arc::PlaceTransition(source, _) if source == *place_id)
+                        matches!(arc, Arc::PlaceTransition(source, _) if source == place_id)
                     }) => DeadlockInterpretation::Final,
                     // Otherwise, we have a regular deadlock
                     _ => DeadlockInterpretation::Deadlock,
@@ -360,12 +396,12 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
         }).collect()
     }
     /// Returns the maximum boundedness of any place in the Petri net
-    fn boundedness(&self) -> usize {
-        self.boundedness.0.iter().copied().max().unwrap_or(0)
+    fn boundedness(&self) -> Bound {
+        self.boundedness.0.iter().copied().max().unwrap_or(Bound::Bounded(Tokens(0)))
     }
     /// Returns true if every place in the Petri net is 1-bounded
     fn is_safe(&self) -> bool {
-        self.boundedness.0.iter().all(|&bound| bound == 1)
+        self.boundedness.0.iter().all(|&bound| bound == Bound::Bounded(Tokens(1)))
     }
     /// Returns true if every transition in the Petri net is L4-live
     fn is_live(&self) -> bool {
@@ -385,7 +421,7 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     /// and all transitions fired at least once
     fn is_sound(&self) -> bool {
         self.liveness.0.iter().all(|&live| live != Live::L0)
-            && self.boundedness.0.iter().all(|&bound| bound > 0)
+            && self.boundedness.0.iter().all(|&bound| bound > Bound::Bounded(Tokens(0)))
     }
 }
 
@@ -413,7 +449,7 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
             write!(f, "{:<7}", marking_id.to_string())?;
             // For each place, print the number of tokens on that place in this marking
             for place in &self.petri_net.places {
-                write!(f, "{:<5}", marking.get(&place.id))?;
+                write!(f, "{:<5}", marking.get(&place.id).0)?;
             }
             // Print the transitions which can fire from this marking and the markings they lead to
             writeln!(f, "{}", Join(continuations, ", "))?;
@@ -424,14 +460,13 @@ impl<'net, C: CapacityFn, W: WeightFn> Display for ReachabilityAnalysis<'net, C,
         for (marking_id, interpretation) in self.deadlocks() {
             writeln!(f, "{}: {}", marking_id, interpretation)?;
         }
-        writeln!(f, "Bounded: {}-Bounded", self.boundedness())?;
+        writeln!(f, "Boundedness: {}", self.boundedness())?;
         writeln!(f, "Safe: {}", self.is_safe())?;
         writeln!(f, "Live: {}", self.is_live())?;
         writeln!(f, "Quasi-Live: {}", self.is_quasi_live())?;
-        writeln!(f, "Sound: {}", self.is_sound())?;
         writeln!(f, "Liveness: {}", self.liveness)?;
         writeln!(f, "Loops: {}", Join(&self.loops(), ", "))?;
-        writeln!(f, "Soundness: {}", self.is_sound())?;
+        writeln!(f, "Sound: {}", self.is_sound())?;
         Ok(())
     }
 }

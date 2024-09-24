@@ -1,7 +1,9 @@
 //! This module provides serialization and deserialization for Petri nets in PNML format.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use super::{CapacityFn, Marking, MarkingFn, PetriNet, WeightFn};
+use super::{CapacityFn, MarkingFn, PetriNet, WeightFn};
+
+const PNML_NAMESPACE: &str = "http://www.pnml.org/version-2009/grammar/pnmlcoremodel";
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Name {
@@ -15,10 +17,26 @@ struct InitialMarking {
     amount: usize,
 }
 
+impl From<super::Tokens> for Option<InitialMarking> {
+    fn from(tokens: super::Tokens) -> Self {
+        if tokens.0 == 0 {
+            None
+        } else {
+            Some(InitialMarking { amount: tokens.0 })
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Capacity {
     #[serde(rename = "text")]
     amount: usize,
+}
+
+impl From<super::Capacity> for Capacity {
+    fn from(capacity: super::Capacity) -> Self {
+        Capacity { amount: capacity.0 }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -51,6 +69,12 @@ struct Inscription {
 struct Weight {
     #[serde(rename = "text")]
     amount: usize,
+}
+
+impl From<super::Weight> for Weight {
+    fn from(weight: super::Weight) -> Self {
+        Weight { amount: weight.0 }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -108,8 +132,8 @@ where
 /// Deserialize a Petri net by deserializing the PNML XML and then converting it to a Petri net
 impl<'de, C, W> Deserialize<'de> for PetriNet<C, W>
 where
-    C: CapacityFn + Default,
-    W: WeightFn + Default,
+    C: CapacityFn + FromIterator<(super::PlaceId, super::Capacity)> + Default,
+    W: WeightFn + FromIterator<(super::Arc, super::Weight)> + Default,
 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         // Deserialize the PNML file and convert it to a Petri net
@@ -120,65 +144,64 @@ where
 /// Convert a parsed PNML file to a Petri net
 impl<C, W> From<Pnml> for PetriNet<C, W>
 where
-    C: CapacityFn + Default,
-    W: WeightFn + Default,
+    C: CapacityFn + FromIterator<(super::PlaceId, super::Capacity)>,
+    W: WeightFn + FromIterator<(super::Arc, super::Weight)>,
 {
     fn from(pnml: Pnml) -> Self {
         let mut places = Vec::new();
         let mut transitions = Vec::new();
         let mut arcs = Vec::new();
-        let mut initial_marking = Marking::default();
-        let mut capacities = C::default();
-        let mut weights = W::default();
+        let mut capacities = Vec::new();
+        let mut weights = Vec::new();
+        let mut initial_marking = super::Marking::default();
 
         for element in pnml.net.elements {
             match element {
                 PnmlElement::Place(place) => {
                     if let Ok(id) = place.id.parse() {
                         if let Some(capacity) = place.capacity {
-                            capacities.set(id, capacity.amount)
+                            capacities.push((id, super::Capacity(capacity.amount)));
                         }
                         if let Some(marking) = place.initial_marking {
-                            initial_marking.set(id, marking.amount)
+                            initial_marking.set(id, super::Tokens(marking.amount));
                         }
-                        places.push(super::Place {
-                            id,
-                            name: place.name.text,
-                        })
+                        places.push(super::Place { id, name: place.name.text });
                     }
                 },
                 PnmlElement::Transition(transition) => {
                     if let Ok(id) = transition.id.parse() {
-                        transitions.push(super::Transition {
-                            id,
-                            name: transition.name.text,
-                        })
+                        transitions.push(super::Transition { id, name: transition.name.text })
                     }
                 },
                 PnmlElement::Arc(pnml) => {
+                    // Parse the source and target IDs to determine the arc type
                     let arc = if let (Ok(source), Ok(target)) = (pnml.source.parse(), pnml.target.parse()) {
                         super::Arc::PlaceTransition(source, target)
                     } else if let (Ok(source), Ok(target)) = (pnml.source.parse(), pnml.target.parse()) {
                         super::Arc::TransitionPlace(source, target)
                     } else {
-                        continue
+                        continue // Skip arcs with invalid source or target IDs. Might change to an error later
                     };
                     if let Some(weight) = pnml.weight {
-                        weights.set(arc, weight.amount);
+                        weights.push((arc, super::Weight(weight.amount)));
                     }
                     arcs.push(arc);
                 }
             }
         }
+        
+        let id = pnml.net.id;
+        let capacities = capacities.into_iter().collect();
+        let weights = weights.into_iter().collect();
 
         PetriNet {
-            id: pnml.net.id,
+            id,
             places,
             transitions,
             arcs,
-            initial_marking,
             capacities,
             weights,
+            initial_marking,
         }
     }
 }
@@ -188,49 +211,31 @@ impl<C: CapacityFn, W: WeightFn> From<PetriNet<C, W>> for Pnml {
     fn from(net: PetriNet<C, W>) -> Self {
         let mut elements = Vec::new();
         for place in net.places {
-            let initial_marking = Some(InitialMarking {
-                amount: net.initial_marking.get(&place.id)
-            });
-            let capacity = net.capacities.get(&place.id).map(|amount| Capacity { amount });
-            elements.push(PnmlElement::Place(Place {
-                id: format!("{}", place.id),
-                name: Name {
-                    text: place.name
-                },
-                initial_marking,
-                capacity
-            }));
+            let id = format!("{}", place.id);
+            let name = Name { text: place.name };
+            let initial_marking = net.initial_marking.get(&place.id).into();
+            let capacity = net.capacities.get(&place.id).map(Into::into);
+            elements.push(PnmlElement::Place(Place { id, name, initial_marking, capacity }));
         }
         for transition in net.transitions {
-            elements.push(PnmlElement::Transition(Transition {
-                id: format!("{}", transition.id),
-                name: Name {
-                    text: transition.name
-                }
-            }));
+            let id = format!("{}", transition.id);
+            let name = Name { text: transition.name };
+            elements.push(PnmlElement::Transition(Transition { id, name }));
         }
         for arc in net.arcs {
             let (source, target) = match arc {
                 super::Arc::PlaceTransition(source, target) => (format!("{}", source), format!("{}", target)),
                 super::Arc::TransitionPlace(source, target) => (format!("{}", source), format!("{}", target)),
             };
-            let weight = net.weights.get(&arc);
-            // Don't mention the weight in the PNML if it is just 1
-            let weight = if weight == 1 { Some(Weight { amount: weight }) } else { None };
-            elements.push(PnmlElement::Arc(Arc {
-                id: format!("a_{}_{}", source, target),
-                source,
-                target,
-                name: Inscription {
-                    inscription: String::new() // TODO: Add name
-                },
-                weight
-            }));
+            let id = format!("a_{}_{}", source, target);
+            let name = Inscription { inscription: String::new() }; // TODO: Add support for arc inscriptions in the petri_net module
+            let weight = net.weights.get(&arc).map(Into::into);
+            elements.push(PnmlElement::Arc(Arc { id, source, target, name, weight }));
         }
         Pnml {
             net: Net {
                 id: net.id,
-                r#type: "http://www.pnml.org/version-2009/grammar/pnmlcoremodel".to_string(),
+                r#type: PNML_NAMESPACE.to_string(),
                 elements
             }
         }
