@@ -90,8 +90,10 @@ pub enum Live {
     /// Fires a finite and deterministic number of times
     L1,
     /// Fires a finite but non-deterministic number of times
+    #[expect(unused)]
     L2,
     /// Fires a non-deterministically finite or infinite number of times
+    #[expect(unused)]
     L3,
     /// Fires a deterministically infinite number of times
     L4,
@@ -182,6 +184,7 @@ impl Markings {
 }
 
 #[derive(Debug, Clone)]
+#[expect(unused)]
 pub struct IncidenceMatrix<'net, C: CapacityFn, W: WeightFn> {
     petri_net: &'net PetriNet<C, W>,
     matrix: Vec<Vec<isize>>,
@@ -223,6 +226,7 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
         transitions
     }
     /// Compute the incidence matrix for detecting unboundedness
+    #[expect(unused)]
     fn incidence_matrix(&self, transition_io: &[TransitionIO]) -> IncidenceMatrix<'_, C, W> {
         let mut matrix: Vec<Vec<isize>> = vec![vec![0; self.transitions.len()]; self.places.len()];
         for (j, transition) in transition_io.iter().enumerate() {
