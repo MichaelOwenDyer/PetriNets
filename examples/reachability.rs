@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::BufReader;
-use petri_nets::{Bpmn, ECNet, Error, parse_xml};
+use petri_nets::{Bpmn, ECNet, Error, parse_xml, Pnml};
 
 fn main() -> Result<(), Error> {
     // Read the input file from the command line arguments
@@ -15,7 +15,8 @@ fn main() -> Result<(), Error> {
             let bpmn: Bpmn = parse_xml(file).map_err(Error::Parse)?;
             bpmn.into()
         } else if input_file.ends_with(".pnml") {
-            parse_xml(file).map_err(Error::Parse)?
+            let pnml: Pnml = parse_xml(file).map_err(Error::Parse)?;
+            pnml.into()
         } else {
             return Err(Error::UnsupportedFileExt);
         }

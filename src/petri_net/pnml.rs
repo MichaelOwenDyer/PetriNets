@@ -1,6 +1,7 @@
 //! This module provides serialization and deserialization for Petri nets in PNML format.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::fmt::{Display, Formatter};
+use serde::{Deserialize, Serialize};
 use super::{CapacityFn, MarkingFn, PetriNet, WeightFn};
 
 const PNML_NAMESPACE: &str = "http://www.pnml.org/version-2009/grammar/pnmlcoremodel";
@@ -112,32 +113,17 @@ struct Net {
 /// Internal representation of a PNML file.
 /// This is the format that the PNML file is serialized to and deserialized from.
 #[derive(Debug, Serialize, Deserialize)]
-struct Pnml {
+pub struct Pnml {
     #[serde(rename = "net")]
     net: Net,
 }
 
-/// Serialize a Petri net by converting it to PNML and then serializing the PNML into XML
-impl<C, W> Serialize for PetriNet<C, W>
-where
-    C: CapacityFn + Clone,
-    W: WeightFn + Clone,
-{
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Convert the Petri net to a PNML file and serialize it
-        Pnml::from(self.to_owned()).serialize(serializer)
-    }
-}
-
-/// Deserialize a Petri net by deserializing the PNML XML and then converting it to a Petri net
-impl<'de, C, W> Deserialize<'de> for PetriNet<C, W>
-where
-    C: CapacityFn + FromIterator<(super::PlaceId, super::Capacity)> + Default,
-    W: WeightFn + FromIterator<(super::Arc, super::Weight)> + Default,
-{
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        // Deserialize the PNML file and convert it to a Petri net
-        Pnml::deserialize(deserializer).map(Into::into)
+/// Display a Pnml file as XML
+impl Display for Pnml {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let mut ser = quick_xml::se::Serializer::new(f);
+        ser.indent(' ', 2);
+        self.serialize(ser).map_err(|_| std::fmt::Error)
     }
 }
 

@@ -9,13 +9,14 @@
 //! - [ ] Use a tree structure for tracking marking sequences and detecting loops / unboundedness
 
 mod reachability;
-mod parse;
+mod pnml;
+
+pub use pnml::Pnml;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::str::FromStr;
-use serde::Serialize;
 
 use crate::bpmn::{Bpmn, ElementType as B};
 
@@ -288,19 +289,6 @@ pub type ECNet = PetriNet<FixedCapacity<1>, FixedWeight<1>>;
 
 /// A Place/Transition Net (PT Net) has settable, implicitly infinite capacities and settable, implicitly single weights
 pub type PTNet = PetriNet<VariableCapacity<{ usize::MAX }>, VariableWeight<1>>;
-
-/// Display a PetriNet as PNML XML
-impl<C, W> Display for PetriNet<C, W>
-where
-    C: CapacityFn + Clone,
-    W: WeightFn + Clone,
-{
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let mut ser = quick_xml::se::Serializer::new(f);
-        ser.indent(' ', 2);
-        self.serialize(ser).map_err(|_| std::fmt::Error)
-    }
-}
 
 impl<C, W> From<Bpmn> for PetriNet<C, W>
 where
