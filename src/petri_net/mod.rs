@@ -13,12 +13,12 @@ mod pnml;
 
 pub use pnml::Pnml;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 use std::hash::Hash;
 use std::str::FromStr;
 
-use crate::bpmn::{Bpmn, ElementType as B};
+use reachability::{Marking, MarkingFn, Tokens};
 
 /// An ID for a place in the Petri net
 /// This is a newtype around `usize` to ensure that we can't accidentally mix up place and transition IDs
@@ -94,57 +94,6 @@ pub struct Transition {
 pub enum Arc {
     PlaceTransition(PlaceId, TransitionId), // Inputs to transitions
     TransitionPlace(TransitionId, PlaceId), // Outputs from transitions
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Tokens(pub usize);
-
-/// A marking function is a mapping from place IDs to the number of tokens in each place
-/// It is used to keep track of the current state of the Petri net
-pub trait MarkingFn: Clone + Eq + Hash {
-    /// Get the marking at a place
-    fn get(&self, id: &PlaceId) -> Tokens;
-    /// Set the marking at a place
-    fn set(&mut self, id: PlaceId, tokens: Tokens);
-}
-
-/// A marking function which is implemented as a BTreeMap (due to its consistent ordering and hashing properties)
-#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
-pub struct Marking(BTreeMap<PlaceId, Tokens>);
-
-impl MarkingFn for Marking {
-    fn get(&self, id: &PlaceId) -> Tokens {
-        // If the place is not in the marking, we assume it has 0 tokens
-        self.0.get(id).copied().unwrap_or_default()
-    }
-    fn set(&mut self, id: PlaceId, tokens: Tokens) {
-        // Internal implementation detail:
-        // We only store places with non-zero tokens in the BTreeMap
-        if tokens.0 == 0 {
-            self.0.remove(&id);
-        } else {
-            self.0.insert(id, tokens);
-        }
-    }
-}
-
-impl<P: Into<PlaceId>, T: Into<Tokens>> FromIterator<(P, T)> for Marking {
-    fn from_iter<I>(iter: I) -> Self
-    where
-        I: IntoIterator<Item = (P, T)>,
-    {
-        let mut marking = Marking::default();
-        for (id, tokens) in iter {
-            marking.set(id.into(), tokens.into());
-        }
-        marking
-    }
-}
-
-impl Marking {
-    pub fn covered_by(&self, other: &Self) -> bool {
-        self.0.iter().all(|(id, own_tokens)| other.get(id).0 >= own_tokens.0)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -290,12 +239,12 @@ pub type ECNet = PetriNet<FixedCapacity<1>, FixedWeight<1>>;
 /// A Place/Transition Net (PT Net) has settable, implicitly infinite capacities and settable, implicitly single weights
 pub type PTNet = PetriNet<VariableCapacity<{ usize::MAX }>, VariableWeight<1>>;
 
-impl<C, W> From<Bpmn> for PetriNet<C, W>
+impl<C, W> From<crate::Bpmn> for PetriNet<C, W>
 where
     C: CapacityFn + Default,
     W: WeightFn + Default,
 {
-    fn from(bpmn: Bpmn) -> Self {
+    fn from(bpmn: crate::Bpmn) -> Self {
         /// A Petri net element can be either a place or a transition
         #[derive(Debug, Clone)]
         enum Element {
@@ -337,19 +286,24 @@ where
 
         // Create petri net elements for each BPMN element so we can refer to them later
         let mut petri_net_elements = HashMap::with_capacity(bpmn.elements.len());
+        use crate::bpmn::ElementType;
         for element in &bpmn.elements {
             let petri_net_element = match &element.element_type {
                 // Start events become places with an initial marking of 1
-                B::StartEvent => {
+                ElementType::StartEvent => {
                     let place = factory.new_place(element.name.clone());
                     // Note down the initial marking of the start place
                     initial_marking.set(place.id, Tokens(1));
                     Element::Place(place)
                 }
                 // End events and XOR gateways become places
-                B::EndEvent | B::ExclusiveGateway => Element::Place(factory.new_place(element.name.clone())),
+                ElementType::EndEvent | ElementType::ExclusiveGateway => {
+                    Element::Place(factory.new_place(element.name.clone()))
+                },
                 // Tasks and parallel gateways become transitions
-                B::Task | B::ParallelGateway => Element::Transition(factory.new_transition(element.name.clone())),
+                ElementType::Task | ElementType::ParallelGateway => {
+                    Element::Transition(factory.new_transition(element.name.clone()))
+                },
             };
             petri_net_elements.insert(element.id.clone(), petri_net_element);
         }

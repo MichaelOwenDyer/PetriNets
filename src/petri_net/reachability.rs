@@ -1,36 +1,88 @@
 //! This module performs reachability analysis on a Petri net
 
-use super::{Arc, CapacityFn, Marking, MarkingFn, PetriNet, PlaceId, Tokens, TransitionId, WeightFn};
+use super::{Arc, CapacityFn, PetriNet, PlaceId, TransitionId, WeightFn};
+use derive_more::Display as DeriveDisplay;
 use std::cmp::Ordering;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt::{Display, Formatter, Result as FmtResult};
+use std::hash::Hash;
 
-/// A unique ID for a marking in the reachability graph
-#[derive(Debug, Clone, Copy)]
+/// A number of tokens in a place
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, DeriveDisplay)]
+pub struct Tokens(pub usize);
+
+/// A unique ID for a marking in the reachability graph.
+/// Displayed as "M" followed by the ID padded by 3 leading 0s, e.g. M000, M001, M002, ...
+#[derive(Debug, Clone, Copy, DeriveDisplay)]
+#[display(fmt = "M{:03}", _0)]
 pub struct MarkingId(usize);
 
-/// Marking IDs are displayed as M followed by the ID padded by 3 leading 0s, e.g. M000, M001, M002, ...
-impl Display for MarkingId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "M{}", self.0)
+/// A marking function is a mapping from place IDs to the number of tokens in each place
+/// It is used to keep track of the current state of the Petri net
+pub trait MarkingFn: Clone + Eq + Hash {
+    /// Get the marking at a place
+    fn get(&self, id: &PlaceId) -> Tokens;
+    /// Set the marking at a place
+    fn set(&mut self, id: PlaceId, tokens: Tokens);
+}
+
+/// A marking function which is implemented as a BTreeMap (due to its consistent ordering and hashing properties)
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct Marking(BTreeMap<PlaceId, Tokens>);
+
+/// TODO: Implement function to see if a marking M is coverable in (P, M0)
+impl Marking {
+    /// Returns true if this marking is covered by another marking.
+    /// A marking is covered by another marking if the other marking has at least as many tokens on each place.
+    /// This can be used to detect unbounded places.
+    pub fn covered_by(&self, other: &Self) -> bool {
+        self.0
+            .iter()
+            .all(|(id, own_tokens)| other.get(id).0 >= own_tokens.0)
     }
 }
 
-/// A continuation is a transition that can be fired from a marking, resulting in a new marking
-/// If the resulting marking has been seen before, the continuation might be a loop
-#[derive(Debug, Clone, Copy)]
+impl MarkingFn for Marking {
+    fn get(&self, id: &PlaceId) -> Tokens {
+        // If the place is not in the marking, we assume it has 0 tokens
+        self.0.get(id).copied().unwrap_or_default()
+    }
+    fn set(&mut self, id: PlaceId, tokens: Tokens) {
+        // Internal implementation detail:
+        // We only store places with non-zero tokens in the BTreeMap
+        if tokens.0 == 0 {
+            self.0.remove(&id);
+        } else {
+            self.0.insert(id, tokens);
+        }
+    }
+}
+
+impl<P: Into<PlaceId>, T: Into<Tokens>> FromIterator<(P, T)> for Marking {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = (P, T)>,
+    {
+        let mut marking = Marking::default();
+        for (id, tokens) in iter {
+            marking.set(id.into(), tokens.into());
+        }
+        marking
+    }
+}
+
+/// A continuation is a transition that can be fired from a marking, resulting in a new marking.
+/// If the resulting marking has been seen before, the continuation might be a loop.
+/// Displayed as "{T}->{M}", e.g. T0->M000, T1->M001, ...
+#[derive(Debug, Clone, Copy, DeriveDisplay)]
+#[display(fmt = "{}->{}", _0, _1)]
 pub struct Continuation(TransitionId, MarkingId);
 
-/// Display a continuation as T->M, e.g. T0->M000, T1->M001, ...
-impl Display for Continuation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        write!(f, "{}->{}", self.0, self.1)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, DeriveDisplay)]
 pub enum Bound {
+    #[display(fmt = "{}-Bounded", _0)]
     Bounded(Tokens),
+    #[display(fmt = "Unbounded")]
     #[expect(unused)] // Will be unused until unboundedness checking is implemented
     Unbounded,
 }
@@ -48,15 +100,6 @@ impl Ord for Bound {
             (Bound::Unbounded, Bound::Unbounded) => Ordering::Equal,
             (Bound::Bounded(_), Bound::Unbounded) => Ordering::Greater,
             (Bound::Unbounded, Bound::Bounded(_)) => Ordering::Less,
-        }
-    }
-}
-
-impl Display for Bound {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Bound::Bounded(tokens) => write!(f, "{}-Bounded", tokens.0),
-            Bound::Unbounded => write!(f, "Unbounded"),
         }
     }
 }
@@ -83,7 +126,7 @@ impl Boundedness {
 
 /// Transition liveness classes describe how many times a transition fires
 /// TODO: Copy definitions from paper
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, DeriveDisplay)]
 pub enum Live {
     /// Can never fire
     L0,
@@ -156,7 +199,7 @@ impl Display for Liveness {
 
 /// A transition ID and the IDs of its input places and of its output places
 /// This allows for easy checking of whether a transition can fire from a given marking
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TransitionIO {
     id: TransitionId,
     inputs: Vec<PlaceId>,
@@ -232,12 +275,16 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
         for (j, transition) in transition_io.iter().enumerate() {
             for &input in &transition.inputs {
                 if let Some(i) = self.places.iter().position(|place| place.id == input) {
-                    matrix[i][j] -= self.weights.get_or_default(&Arc::PlaceTransition(input, transition.id)).0 as isize;
+                    matrix[i][j] -= self.weights
+                        .get_or_default(&Arc::PlaceTransition(input, transition.id))
+                        .0 as isize;
                 }
             }
             for &output in &transition.outputs {
                 if let Some(i) = self.places.iter().position(|place| place.id == output) {
-                    matrix[i][j] += self.weights.get_or_default(&Arc::TransitionPlace(transition.id, output)).0 as isize;
+                    matrix[i][j] += self.weights
+                        .get_or_default(&Arc::TransitionPlace(transition.id, output))
+                        .0 as isize;
                 }
             }
         }
@@ -347,20 +394,12 @@ impl<C: CapacityFn, W: WeightFn> PetriNet<C, W> {
 /// How to interpret a deadlock in the reachability graph
 /// A final (desired) deadlock is a marking with only one token on a place with no outgoing arcs
 /// Any other deadlock is a non-final (undesired) deadlock
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, DeriveDisplay)]
 pub enum DeadlockInterpretation {
+    #[display(fmt = "final")]
     Final,
+    #[display(fmt = "deadlock")]
     Deadlock,
-}
-
-/// Display a deadlock interpretation as "final" or "deadlock"
-impl Display for DeadlockInterpretation {
-    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            DeadlockInterpretation::Final => write!(f, "final"),
-            DeadlockInterpretation::Deadlock => write!(f, "deadlock"),
-        }
-    }
 }
 
 impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
@@ -400,10 +439,12 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
         }).collect()
     }
     /// Returns the maximum boundedness of any place in the Petri net
+    #[rustfmt::skip]
     fn boundedness(&self) -> Bound {
         self.boundedness.0.iter().copied().max().unwrap_or(Bound::Bounded(Tokens(0)))
     }
     /// Returns true if every place in the Petri net is 1-bounded
+    #[rustfmt::skip]
     fn is_safe(&self) -> bool {
         self.boundedness.0.iter().all(|&bound| bound == Bound::Bounded(Tokens(1)))
     }
@@ -423,6 +464,7 @@ impl<'net, C: CapacityFn, W: WeightFn> ReachabilityAnalysis<'net, C, W> {
     }
     /// Returns true if all places had at least one token at some point,
     /// and all transitions fired at least once
+    #[rustfmt::skip]
     fn is_sound(&self) -> bool {
         self.liveness.0.iter().all(|&live| live != Live::L0)
             && self.boundedness.0.iter().all(|&bound| bound > Bound::Bounded(Tokens(0)))

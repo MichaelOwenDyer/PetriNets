@@ -16,3 +16,6 @@ features = ["derive"]
 
 [dependencies.ahash]
 version = "0.8.11"
+
+[dependencies.derive_more]
+version = "0.99.18"
