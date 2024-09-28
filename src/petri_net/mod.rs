@@ -14,7 +14,7 @@ mod pnml;
 pub use pnml::Pnml;
 
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::hash::Hash;
 use std::str::FromStr;
 
@@ -32,14 +32,14 @@ pub struct TransitionId(usize);
 
 /// PlaceIDs are displayed as P followed by the ID, e.g. P0, P1, P2, ...
 impl Display for PlaceId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "P{}", self.0)
     }
 }
 
 /// TransitionIDs are displayed as T followed by the ID, e.g. T0, T1, T2, ...
 impl Display for TransitionId {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "T{}", self.0)
     }
 }

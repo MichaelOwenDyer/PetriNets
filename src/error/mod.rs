@@ -1,6 +1,6 @@
 //! This module defines the error type for this program.
 
-use std::fmt::{Debug, Display, Formatter};
+use std::fmt::{Debug, Display, Formatter, Result as FmtResult};
 
 pub enum Error {
     NoInputFile, // Error when no input file is provided
@@ -10,7 +10,7 @@ pub enum Error {
 }
 
 impl Debug for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Error::NoInputFile => write!(f, "No input file provided. Exiting..."),
             Error::UnsupportedFileExt => write!(f, "Unsupported file extension. Supported file extensions are: .bpmn, .pnml"),
@@ -21,7 +21,7 @@ impl Debug for Error {
 }
 
 impl Display for Error {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         Debug::fmt(self, f)
     }
 }

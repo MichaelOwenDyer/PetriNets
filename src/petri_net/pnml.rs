@@ -1,6 +1,6 @@
 //! This module provides serialization and deserialization for Petri nets in PNML format.
 
-use std::fmt::{Display, Formatter};
+use std::fmt::{Display, Formatter, Result as FmtResult, Error as FmtError};
 use serde::{Deserialize, Serialize};
 use super::{CapacityFn, MarkingFn, PetriNet, WeightFn};
 
@@ -120,10 +120,10 @@ pub struct Pnml {
 
 /// Display a Pnml file as XML
 impl Display for Pnml {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         let mut ser = quick_xml::se::Serializer::new(f);
         ser.indent(' ', 2);
-        self.serialize(ser).map_err(|_| std::fmt::Error)
+        self.serialize(ser).map_err(|_| FmtError)
     }
 }
 
